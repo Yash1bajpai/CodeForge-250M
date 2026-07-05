@@ -49,9 +49,9 @@ class CodeDataset(Dataset):
                     while len(buffer) >= seq_length + 1:
                         self.samples.append(buffer[:seq_length + 1])
                         buffer = buffer[seq_length:]
-                        if len(self.samples) >= 5000:  # Load 5000 sequence chunks (~10 Million tokens) for continuous training
+                        if len(self.samples) >= 50000:  # Load 5000 sequence chunks (~10 Million tokens) for continuous training
                             break
-            if len(self.samples) >= 5000:
+            if len(self.samples) >= 50000:
                 break
         print(f"--> [DataLoader] Prepared {len(self.samples):,} sequence chunks ({len(self.samples)*seq_length:,} tokens total)!\n")
 
@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M TRAINING CHUNK 2] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M OVERNIGHT CHUNK 4] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
@@ -106,10 +106,10 @@ def train():
     start_step = 0
     ckpt_dir = "checkpoints/CodeForge-250M"
     os.makedirs(ckpt_dir, exist_ok=True)
-    chunk1_path = os.path.join(ckpt_dir, "checkpoint_chunk1.pt")
-    if os.path.exists(chunk1_path):
-        print(f"--> [Resume] Resuming weights from Chunk 1 Checkpoint: {chunk1_path}...")
-        ckpt = torch.load(chunk1_path, map_location=device)
+    latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
+    if os.path.exists(latest_path):
+        print(f"--> [Resume] Resuming weights from Latest Checkpoint: {latest_path}...")
+        ckpt = torch.load(latest_path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         start_step = ckpt.get('step', 50)
@@ -124,7 +124,12 @@ def train():
     model.train()
     start_time = time.time()
     
-    for step_offset, (x, y) in enumerate(dataloader, 1):
+    def get_continuous_batches(loader):
+        while True:
+            for b in loader:
+                yield b
+
+    for step_offset, (x, y) in enumerate(get_continuous_batches(dataloader), 1):
         step = start_step + step_offset
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         
@@ -163,7 +168,7 @@ def train():
             }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
             print(f"--> [Checkpoint] Saved weights at Step {step} to {ckpt_path}", flush=True)
             
-        if step_offset >= 500:  # Train 500 steps (2 Million tokens) for Chunk 2
+        if step_offset >= 6000:  # Train 6000 steps (~25 Million tokens) for Overnight Chunk 3
             break
             
     elapsed = time.time() - start_time
@@ -171,8 +176,8 @@ def train():
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [CHUNK 2 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
-    print("SUCCESS: Tesla T4 GPU Training Chunk 2 completed and saved!")
+    print(f"--> [OVERNIGHT CHUNK 4 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 4 completed and saved!")
 
 if __name__ == "__main__":
     train()
