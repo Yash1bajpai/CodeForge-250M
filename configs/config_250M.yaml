@@ -1,0 +1,54 @@
+# CodeForge-250M Training Configuration (DevMind / Nexus-Agent Optimized)
+model:
+  name: "CodeForge-250M"
+  vocab_size: 32000
+  hidden_size: 1024
+  intermediate_size: 2816  # Multiple of 256 for GPU Tensor Core efficiency (approx 2.67x hidden)
+  num_hidden_layers: 16
+  num_attention_heads: 16
+  num_key_value_heads: 4   # GQA: 4 query heads share 1 KV head (16 / 4 = 4 groups)
+  max_position_embeddings: 2048
+  rms_norm_eps: 1e-5
+  rope_theta: 10000.0
+  tie_word_embeddings: false
+  use_cache: true
+
+data:
+  dataset_name: "multi-source-curated"
+  seq_length: 2048
+  train_split: "train"
+  val_split: "validation"
+  num_workers: 4
+  languages: ["the-stack-v2", "commitpackft", "evol-codealpaca", "stackoverflow-py", "cosmopedia-edu"]
+  language_weights: [0.72, 0.07, 0.09, 0.06, 0.06]
+  commitpackft_epochs: 3   # OctoCoder +23% edit improvement recipe!
+  target_tokens: 8000000000  # 8B tokens
+
+training:
+  batch_size_per_device: 16
+  gradient_accumulation_steps: 16
+  total_batch_size_sequences: 256  # 256 * 2048 = 524,288 tokens per step
+  learning_rate: 6.0e-4
+  min_learning_rate: 6.0e-5        # 10% of max LR
+  warmup_steps: 2000
+  max_steps: 15258                 # ~8B tokens / 524k tokens per step
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  optimizer: "AdamW"
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-8
+  precision: "bf16"                # bf16 on A10G/A100, fp16 fallback on T4
+  deepspeed_config: "configs/ds_zero2.json"
+
+checkpointing:
+  save_steps: 100
+  save_time_interval_minutes: 20
+  output_dir: "checkpoints/CodeForge-250M"
+  hf_repo_id: "Yash1bajpai/CodeForge-250M"
+  push_to_hub: true
+
+logging:
+  wandb_project: "CodeForge"
+  wandb_run_name: "250M-devmind-run-1"
+  log_steps: 10
