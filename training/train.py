@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 10 / CHUNK 10] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 11 / CHUNK 11] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
@@ -176,8 +176,8 @@ def train():
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [STAGE 10 / CHUNK 10 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
-    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 10 completed and saved!")
+    print(f"--> [STAGE 11 / CHUNK 11 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 11 completed and saved!")
 
 if __name__ == "__main__":
     train()
