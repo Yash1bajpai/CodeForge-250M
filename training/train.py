@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M OVERNIGHT CHUNK 4] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 5 / CHUNK 5] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
@@ -151,7 +151,7 @@ def train():
             lr = optimizer.param_groups[0]['lr']
             print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {lr:<10.2e} | {vram_gb:<10.2f} | Active Computing ⚡", flush=True)
             
-        if step % 100 == 0:
+        if step % 1000 == 0:
             ckpt_path = os.path.join(ckpt_dir, f"checkpoint_step_{step}.pt")
             torch.save({
                 'step': step,
@@ -176,8 +176,8 @@ def train():
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [OVERNIGHT CHUNK 4 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
-    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 4 completed and saved!")
+    print(f"--> [STAGE 5 / CHUNK 5 COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 5 completed and saved!")
 
 if __name__ == "__main__":
     train()
