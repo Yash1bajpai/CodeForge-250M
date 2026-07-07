@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 15 / L40S HALF-BILLION SPRINT] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 16 / L40S 1 BILLION TOKEN SPRINT (BATCH SIZE 8)] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
@@ -98,7 +98,7 @@ def train():
     print(f"    Total Parameters   : {param_count:,} (~246M Edge AI Target)")
     
     dataset = CodeDataset("data/tokenized", seq_length=cfg["max_position_embeddings"])
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=2, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1, betas=(0.9, 0.95))
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
@@ -176,7 +176,7 @@ def train():
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [STAGE 15 / L40S HALF-BILLION SPRINT COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    print(f"--> [STAGE 16 / L40S 1 BILLION TOKEN SPRINT (BATCH SIZE 8) COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
     print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 15 completed and saved!")
 
 if __name__ == "__main__":
