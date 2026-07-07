@@ -10,19 +10,18 @@ This document maintains the complete historical memory and design evolution of t
 **Design decisions:** Specified minimum versions to ensure Flash Attention 2 compatibility and stable DeepSpeed ZeRO-2 integration on Lightning AI and Kaggle TPUs/GPUs.
 **Interactions:** Read by `scripts/setup_env.sh` and pip during environment bootstrap.
 **Gotchas:** DeepSpeed requires pre-compiled CUDA extensions or runtime ninja builds; ensure build-essential is present on clean Linux containers.
-**Changed this session—* Initial creation of project requirements.
+**Changed this session:** Initial creation of project requirements.
 
-22# [scripts/setup_env.sh](file:///teamspace/studios/this_studio/CodeForge-250M/scripts/setup_env.sh) — [2026-07-05 / Session 1]
+### [scripts/setup_env.sh](file:///teamspace/studios/this_studio/CodeForge-250M/scripts/setup_env.sh) — [2026-07-05 / Session 1]
 **Purpose:** Automated environment bootstrap script for setting up Python dependencies, CUDA verification, and Hugging Face Hub authentication.
 **Key components:** `pip install -r requirements.txt`, PyTorch GPU verification check, `huggingface_hub.login` execution.
 **Design decisions:** Embedded fallback environment variable check for `HF_TOKEN` to allow seamless automated login across Lightning AI, Kaggle, and Camber without manual user intervention.
 **Interactions:** Calls `requirements.txt`, authenticates user `Yash1bajpai` on HF Hub for automated checkpoint pushing.
 **Gotchas:** Must be made executable with `chmod +x` before running.
-**Changed this session—* Initial creation of automated environment setup script.
-
+**Changed this session:** Initial creation of automated environment setup script.
 
 ### [configs/config_250M.yaml](file:///teamspace/studios/this_studio/CodeForge-250M/configs/config_250M.yaml) — [2026-07-05 / Session 1]
-**Purpose:** Primary training configuration for CodeForge-250M targeting ~8B code tokens on Lightning AI and Kaggle.
+**Purpose:** Primary training configuration for CodeForge-250M targeting 8-10B code tokens (final, confirmed) on Lightning AI and Kaggle.
 **Key components:** Model architecture hyperparameters (16 layers, 1024 hidden, 2816 FFN, 16 heads, 4 GQA groups), training schedule (6e-4 max LR, 2000 warmup steps, 524k batch size), and checkpointing interval (every 100 steps or 20 min).
 **Design decisions:** FFN intermediate size set to 2816 (11 * 256) instead of exact 2.67x (2730) for optimal GPU Tensor Core memory alignment.
 **Interactions:** Read by `training/train.py` and `models/architecture.py` during model instantiation.
@@ -180,3 +179,17 @@ To solve the industry-wide failure where small local edge models (250M/500M) fai
 - In `nexus_bridge.py`, we integrate **Grammar-Constrained Decoding (Structured Outputs / JSON Schema Enforcement)** via `outlines` / `llama.cpp` JSON grammar (`json.gbnf`).
 - During inference, the token logits are masked against a deterministic Finite State Machine (FSM). Any token that would violate the ReAct `<thought>/<action>` tags or JSON syntax is assigned `-inf` probability.
 - **Result:** 100% mathematically guaranteed valid JSON tool calls and structured reasoning 100% of the time on local edge devices!
+
+
+### [2026-07-07] - Comprehensive Project Audit, Budget-Aware 8-10B Plan & Git Repo Cleanup
+**Purpose:** Reconcile project state, establish a budget-realistic hybrid training strategy for the confirmed 8-10B token target, and execute a thorough repository cleanup.
+**Key components:** `README.md`, `docs/CONTEXT_HANDOFF.md`, `.gitignore`, and repository root structure.
+**Design decisions:**
+- **Confirmed Target (8-10B Tokens):** Removed any lingering references to "1B" or "6-8B" as end goals. Explicitly clarified that 1B tokens is Milestone #1 (initial acceleration burst), while 8-10B is the ultimate Chinchilla-plus scaling target.
+- **Budget-Aware Training Plan ($19.10 Total Wealth):** Confirmed exact Lightning AI balance ($4.10 teamspace + $15.00 unallocated reserve = $19.10 USD). Because L40S ($2.70/hr, ~151M tokens/hr) would consume ~$17.88 per billion tokens, continuous L40S training will exhaust funds. The established strategy restricts L40S to short acceleration bursts (~1B tokens max), shifting primary background training to FREE Tesla T4 hours (~30M tokens/hr) and weekly Kaggle free GPU quotas (30 hrs/week) for the remaining 6.4-8.4B tokens.
+- **Full Checkpoint Bundle Resume Protocol:** When resuming from sleep/pause at Step 89,000+ (~576M+ tokens), the system MUST load the full checkpoint bundle (model weights + AdamW optimizer state + scheduler state + RNG state + dataset-revision hash). Verified that dataset-revision hash matching is enforced before training continuation.
+- **Git Repo Cleanup:** Untracked 20+ one-off temporary launcher/debug scripts (`start_chunk...py`, `launch_...py`, `patch_remote.py`, etc.) and `training.log` from git tracking. Moved essential reusable utilities (`auto_release_chunk3.py`, `prune_disk_bloat.py`) into `scripts/`. Updated `.gitignore` to block `*.log`, `start_*.py`, `run_*.py`, `launch_*.py`, and `memory.md`.
+**Interactions:** Aligns documentation, Git tracking, and cloud execution protocols across local Windows environment and Lightning AI Studio.
+**Gotchas:** Never run `git add .` without verifying `.gitignore` rules first to prevent temporary cloud scripts from polluting the public repository.
+**Changed this session:** Cleaned repo root, updated documentation targets to 8-10B tokens, logged budget-aware training plan, and committed changes cleanly.
+ng 100% of the time on local edge devices!

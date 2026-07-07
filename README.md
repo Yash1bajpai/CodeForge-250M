@@ -31,6 +31,14 @@ To prevent small edge models from hallucinating syntax during agentic tool calli
 - **Pillar 1 (Data Layer):** Incorporated structured Function-Calling and ReAct agent trajectories (`<thought>`, `<action>`) directly into the instruction training mix.
 - **Pillar 2 (Inference Layer):** Integrated **Grammar-Constrained Decoding (JSON Schema Enforcement)** in `nexus_bridge.py` via outlines / finite-state machine masking, mathematically guaranteeing 100% syntactically valid JSON tool calls!
 
+### 4. Training Scale & Budget-Aware Hybrid Strategy (8-10B Token Target)
+- **Ultimate Target:** **8 to 10 Billion Tokens (Final, Confirmed)** for Chinchilla-plus scaling, syntax mastery, and coding fluency.
+- **Milestone #1:** The initial **1 Billion Token** mark serves as an acceleration burst milestone, not the end goal.
+- **Budget-Realistic Strategy:** To complete 8-10B tokens within a finite cloud budget ($19.10 USD on Lightning AI):
+  - Use short L40S acceleration bursts (~1B tokens max) for rapid milestone advancement.
+  - Shift primary background training to **FREE Tesla T4 hours (~30M tokens/hr)** for the bulk of the remaining 6.4-8.4B tokens.
+  - Supplement with Kaggle's 30 free GPU-hours/week (renews weekly) to ensure continuous zero-cost training progress.
+
 ---
 
 ## 📊 Live Tesla T4 GPU Training Convergence
