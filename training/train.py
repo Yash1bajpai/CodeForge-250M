@@ -168,7 +168,7 @@ def train():
             }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
             print(f"--> [Checkpoint] Saved weights at Step {step} to {ckpt_path}", flush=True)
             
-        if step_offset >= 6000:  # Train 6000 steps (~25 Million tokens) for Overnight Chunk 3
+        if step_offset >= 500000:  # Train 6000 steps (~25 Million tokens) for Overnight Chunk 3
             break
             
     elapsed = time.time() - start_time
