@@ -6,3 +6,10 @@ checkpoints/
 *.log
 *.pt
 __pycache__/
+start_*.py
+run_*.py
+launch_*.py
+apply_*.py
+patch_*.py
+inspect_*.py
+memory.md
