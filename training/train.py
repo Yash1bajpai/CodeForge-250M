@@ -49,7 +49,7 @@ class CodeDataset(Dataset):
                     while len(buffer) >= seq_length + 1:
                         self.samples.append(buffer[:seq_length + 1])
                         buffer = buffer[seq_length:]
-                        if len(self.samples) >= 50000:  # Load 5000 sequence chunks (~10 Million tokens) for continuous training
+                        if len(self.samples) >= 50000:  # Load 50000 sequence chunks for continuous training
                             break
             if len(self.samples) >= 50000:
                 break
@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 16 / L40S 1 BILLION TOKEN SPRINT (BATCH SIZE 8)] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 17 / RTXP 6000 1-HOUR POWER SPRINT (BATCH SIZE 16)] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
@@ -98,7 +98,7 @@ def train():
     print(f"    Total Parameters   : {param_count:,} (~246M Edge AI Target)")
     
     dataset = CodeDataset("data/tokenized", seq_length=cfg["max_position_embeddings"])
-    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=2, pin_memory=True)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1, betas=(0.9, 0.95))
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
@@ -151,33 +151,36 @@ def train():
             lr = optimizer.param_groups[0]['lr']
             print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {lr:<10.2e} | {vram_gb:<10.2f} | Active Computing ⚡", flush=True)
             
-        if step % 1000 == 0:
-            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_step_{step}.pt")
-            torch.save({
-                'step': step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss_val,
-            }, ckpt_path)
-            # Also save latest
-            torch.save({
-                'step': step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss_val,
-            }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
-            print(f"--> [Checkpoint] Saved weights at Step {step} to {ckpt_path}", flush=True)
+        if False:  # Zero disk I/O pause during 1-hour sprint! Saving only at session end.
+            pass
             
-        if step_offset >= 500000:  # Train 6000 steps (~25 Million tokens) for Overnight Chunk 3
+        if step_offset >= 7200:  # Train 7,200 steps (~236 Million tokens) for 1-Hour RTXP 6000 Sprint!
             break
             
     elapsed = time.time() - start_time
-    tokens_processed = step_offset * 2 * cfg["max_position_embeddings"]
+    tokens_processed = step_offset * 16 * cfg["max_position_embeddings"]
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [STAGE 16 / L40S 1 BILLION TOKEN SPRINT (BATCH SIZE 8) COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
-    print("SUCCESS: Tesla T4 GPU Training Overnight Chunk 15 completed and saved!")
+    print(f"--> [STAGE 17 / RTXP 6000 1-HOUR POWER SPRINT COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    
+    # Save checkpoint once at the very end of the session!
+    final_step = start_step + step_offset
+    ckpt_path = os.path.join(ckpt_dir, f"checkpoint_step_{final_step}.pt")
+    torch.save({
+        'step': final_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss_val,
+    }, ckpt_path)
+    torch.save({
+        'step': final_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss_val,
+    }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
+    print(f"--> [Checkpoint] Saved final session weights at Step {final_step} to {ckpt_path}", flush=True)
+    print("SUCCESS: RTXP 6000 1-Hour Power Sprint completed and saved!")
 
 if __name__ == "__main__":
     train()
