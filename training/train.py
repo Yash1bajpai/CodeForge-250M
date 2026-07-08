@@ -151,6 +151,22 @@ def train():
             lr = optimizer.param_groups[0]['lr']
             print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {lr:<10.2e} | {vram_gb:<10.2f} | Active Computing ⚡", flush=True)
             
+        if step % 1000 == 0:
+            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_step_{step}.pt")
+            torch.save({
+                'step': step,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss_val,
+            }, ckpt_path)
+            torch.save({
+                'step': step,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss_val,
+            }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
+            print(f"--> [Checkpoint] Auto-saved Spot/Interruptible milestone at Step {step} to {ckpt_path}", flush=True)
+            
         if os.path.exists("STOP_AND_SAVE"):
             print(f"--> [Signal] STOP_AND_SAVE trigger detected at Step {step}! Saving checkpoint and exiting...", flush=True)
             try:
