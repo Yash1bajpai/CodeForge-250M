@@ -69,7 +69,7 @@ def train():
     sys.stdout = Logger(log_path)
     
     print("\n=======================================================")
-    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 18 / RTXP 6000 POWER SPRINT (BATCH SIZE 16)] ===")
+    print(f"=== [LAUNCHING CODEFORGE-250M STAGE 19 / 1 BILLION TOKEN SPRINT (BATCH SIZE 16)] ===")
     print(f"=== [LOGGING TO: {log_path}] ===")
     print("=======================================================")
     
