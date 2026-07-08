@@ -173,7 +173,7 @@ def train():
             print(f"--> [Checkpoint] Successfully saved weights at Step {step} to {ckpt_path}", flush=True)
             break
             
-        if step_offset >= 7200:  # Train 7,200 steps (~236 Million tokens) for 1-Hour Power Sprint!
+        if step_offset >= 6200:  # Train 6,200 steps (~203 Million tokens) to cross 1 BILLION TOKEN MILESTONE!
             break
             
     elapsed = time.time() - start_time
@@ -181,7 +181,7 @@ def train():
     tps = tokens_processed / elapsed
     
     print("-" * 65)
-    print(f"--> [STAGE 18 / RTXP 6000 POWER SPRINT COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
+    print(f"--> [STAGE 19 / 1 BILLION TOKEN SPRINT COMPLETED] Processed {tokens_processed:,} tokens in {elapsed:.1f} seconds ({tps:.1f} tokens/sec)!")
     
     # Save checkpoint once at the very end of the session!
     final_step = start_step + step_offset
@@ -199,7 +199,7 @@ def train():
         'loss': loss_val,
     }, os.path.join(ckpt_dir, "latest_checkpoint.pt"))
     print(f"--> [Checkpoint] Saved final session weights at Step {final_step} to {ckpt_path}", flush=True)
-    print("SUCCESS: RTXP 6000 Power Sprint completed and saved!")
+    print("SUCCESS: Stage 19 completed! 1 BILLION TOKEN MILESTONE CROSSED!")
 
 if __name__ == "__main__":
     train()
