@@ -13,3 +13,5 @@ apply_*.py
 patch_*.py
 inspect_*.py
 memory.md
+.agents/
+

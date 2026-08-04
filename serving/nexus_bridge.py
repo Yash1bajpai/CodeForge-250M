@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Optional
 from transformers import PreTrainedTokenizerFast
@@ -42,7 +43,4 @@ class DevMindSidecarEngine:
 if __name__ == "__main__":
     engine = DevMindSidecarEngine()
     print("Test Generate:", engine.generate("def sort_list(arr):"))
-    print("Test Infill:", engine.infill("def solve():
-    x = 10
-", "
-    return result"))
+    print("Test Infill:", engine.infill("def solve():\n    x = 10\n", "\n    return result"))

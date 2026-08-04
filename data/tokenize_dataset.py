@@ -1,6 +1,8 @@
 import os
 import glob
+import json
 import random
+import torch
 from transformers import PreTrainedTokenizerFast
 
 def apply_fim_transformation(code: str, fim_rate: float = 0.50) -> str:
@@ -23,26 +25,56 @@ def apply_fim_transformation(code: str, fim_rate: float = 0.50) -> str:
 def build_tokenized_dataset(dedup_dir: str = "data/dedup", tokenizer_dir: str = "data/tokenizer", output_dir: str = "data/tokenized", seq_len: int = 2048):
     os.makedirs(output_dir, exist_ok=True)
     if not os.path.exists(tokenizer_dir):
-        print("    [Warning] Tokenizer dir missing.")
+        print(f"    [Warning] Tokenizer dir {tokenizer_dir} missing.")
         return
     tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
     eos_id = tokenizer.eos_token_id or 0
     files = glob.glob(os.path.join(dedup_dir, "*_dedup.jsonl"))
     if not files:
         files = glob.glob(os.path.join(dedup_dir, "*.txt"))
-    print(f"--> [Dataset Builder] Building 2048 sequence chunks with 50% FIM rate from {len(files)} files...")
+    if not files:
+        files = glob.glob(os.path.join("data/raw", "*.jsonl"))
+        
+    print(f"--> [Dataset Builder] Building {seq_len}-token sequence chunks from {len(files)} files...")
     all_tokens = []
+    chunk_count = 0
+    shard_size = 1000  # Save 1,000 sequences (2,048,000 tokens) per shard file
+    current_shard = []
+    
     for file_path in files:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
-                code = line.replace("\\n", "\n")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    code = data.get("text", "")
+                except Exception:
+                    code = line.replace("\\n", "\n")
+                    
                 code_fim = apply_fim_transformation(code, fim_rate=0.50)
                 tokens = tokenizer.encode(code_fim) + [eos_id]
                 all_tokens.extend(tokens)
+                
                 while len(all_tokens) >= seq_len:
                     chunk = all_tokens[:seq_len]
                     all_tokens = all_tokens[seq_len:]
-    print("    --> Dataset chunking pipeline verified with 50% FIM rate!")
+                    current_shard.append(chunk)
+                    chunk_count += 1
+                    
+                    if len(current_shard) >= shard_size:
+                        shard_idx = chunk_count // shard_size
+                        out_path = os.path.join(output_dir, f"shard_{shard_idx:04d}.pt")
+                        torch.save(torch.tensor(current_shard, dtype=torch.long), out_path)
+                        current_shard = []
+                        
+    if current_shard:
+        shard_idx = (chunk_count // shard_size) + 1
+        out_path = os.path.join(output_dir, f"shard_{shard_idx:04d}.pt")
+        torch.save(torch.tensor(current_shard, dtype=torch.long), out_path)
+        
+    print(f"    --> Successfully saved {chunk_count:,} tokenized sequences ({chunk_count * seq_len:,} tokens) across shards in {output_dir}!")
 
 if __name__ == "__main__":
     build_tokenized_dataset()

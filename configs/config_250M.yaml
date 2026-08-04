@@ -14,15 +14,14 @@ model:
   use_cache: true
 
 data:
-  dataset_name: "multi-source-curated"
+  dataset_name: "multi-source-nexus-agent"
   seq_length: 2048
   train_split: "train"
   val_split: "validation"
   num_workers: 4
-  languages: ["the-stack-v2", "commitpackft", "evol-codealpaca", "stackoverflow-py", "cosmopedia-edu"]
-  language_weights: [0.72, 0.07, 0.09, 0.06, 0.06]
-  commitpackft_epochs: 3   # OctoCoder +23% edit improvement recipe!
-  target_tokens: 8000000000  # 8B tokens
+  languages: ["starcoder-python", "glaive-function-calling", "codeparrot-clean", "evol-codealpaca", "tiny-textbooks", "commitpackft-python", "code-contests"]
+  language_weights: [0.45, 0.15, 0.12, 0.10, 0.08, 0.05, 0.05]
+  target_tokens: 2350000000  # 2.35B unique tokens (1 epoch within budget)
 
 training:
   batch_size_per_device: 16
@@ -30,8 +29,8 @@ training:
   total_batch_size_sequences: 256  # 256 * 2048 = 524,288 tokens per step
   learning_rate: 6.0e-4
   min_learning_rate: 6.0e-5        # 10% of max LR
-  warmup_steps: 2000
-  max_steps: 15258                 # ~8B tokens / 524k tokens per step
+  warmup_steps: 500                # ~10% of total steps
+  max_steps: 4482                  # ~2.35B tokens / 524,288 tokens per step
   weight_decay: 0.1
   max_grad_norm: 1.0
   optimizer: "AdamW"
