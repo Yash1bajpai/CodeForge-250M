@@ -9,8 +9,8 @@ echo "=== [CodeForge-250M] Starting Environment Setup ==="
 
 # 1. Update pip and install requirements
 echo "--> Installing Python dependencies..."
-pip install --upgrade pip
-pip install -r "$PROJECT_ROOT/requirements.txt"
+python3 -m pip install --upgrade pip
+python3 -m pip install -r "$PROJECT_ROOT/requirements.txt"
 
 # 2. Check GPU availability and CUDA version
 echo "--> Checking CUDA / GPU Status..."
