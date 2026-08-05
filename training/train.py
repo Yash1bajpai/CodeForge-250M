@@ -243,6 +243,31 @@ def train():
             }, latest_path)
             print(f"--> [Checkpoint] Auto-saved milestone at Step {step} to {ckpt_path}", flush=True)
             
+            # PUSH TO HUGGING FACE HUB EVERY 1000 STEPS
+            if step % 1000 == 0:
+                hf_token = os.environ.get("HF_TOKEN")
+                hf_repo = os.environ.get("HF_REPO_ID", "Yash1bajpai/CodeForge-250M")
+                if hf_token:
+                    print(f"--> [HF Hub] Uploading checkpoint Step {step} to Hugging Face Hub ({hf_repo})...", flush=True)
+                    try:
+                        from huggingface_hub import HfApi
+                        api = HfApi(token=hf_token)
+                        # Create repo if it doesn't exist
+                        api.create_repo(repo_id=hf_repo, exist_ok=True, private=False)
+                        
+                        # Upload just the latest checkpoint to save bandwidth, or the whole dir
+                        api.upload_file(
+                            path_or_fileobj=latest_path,
+                            path_in_repo="latest_checkpoint.pt",
+                            repo_id=hf_repo,
+                            commit_message=f"Upload training checkpoint - Step {step} (Loss: {loss_val:.4f})"
+                        )
+                        print(f"--> [HF Hub] Successfully uploaded Step {step} checkpoint!", flush=True)
+                    except Exception as e:
+                        print(f"    [Warning] HF Hub upload failed: {e}", flush=True)
+                else:
+                    print("    [Warning] Skipping HF Hub upload because HF_TOKEN is not set.", flush=True)
+
         stop_file = os.path.join(PROJECT_ROOT, "STOP_AND_SAVE")
         if os.path.exists(stop_file):
             print(f"--> [Signal] STOP_AND_SAVE trigger detected at Step {step}! Saving checkpoint and exiting...", flush=True)
