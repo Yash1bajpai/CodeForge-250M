@@ -226,3 +226,36 @@ To solve the industry-wide failure where small local edge models (250M/500M) fai
 5. **Credit & Wealth Preservation:** Spent only ~$1.23 USD on Stage 19, leaving **~$14.17 USD** in our available balance—enough to train another ~2.1 Billion tokens directly on RTX PRO 6000 Spot!
 **Interactions:** Read by all AI assistants to understand current checkpoint status, Spot mode pricing, and our 1.02 Billion token milestone achievement.
 **Changed this session:** Documented Stage 19 completion, Spot mode 1,000-step shield, and 1.02 Billion token milestone.
+---
+
+### [2026-08-05] - RUN #1 DECLARED FAILED (OVERFITTING) / REPO CLEANED / RUN #2 PREFLIGHT AUDIT
+
+**Purpose:** Corrects the record on the "1.02 Billion Token Victory" documented above, resets the project to a from-scratch training run, and records the preflight audit blockers found in the code as committed at `88dede2`.
+
+**1. Run #1 is discarded — the 1.02B-token result was memorisation, not mastery.**
+The entries above celebrate a final loss of `0.0153` / perplexity `1.02` as "world-class syntax fluency." That reading was incorrect. Perplexity 1.02 on a 250M-parameter model means the network was reproducing training data verbatim. Three compounding faults caused it:
+  - **Effective batch 128x too small:** 1,019,834,368 tokens / 102,546 steps = ~9,945 tokens/step against a configured 524,288. Gradient accumulation was not in effect.
+  - **Corpus cycled 5-20x:** `train.py`'s infinite `while True: for b in loader` generator silently re-iterates the same shards. With ~50-200M unique tokens available, 1.02B processed tokens means many epochs over identical data.
+  - **No held-out signal:** success was judged purely on falling training loss. No validation split and no HumanEval/MBPP gate ran during training, so memorisation was indistinguishable from learning.
+All checkpoints from run #1 have been removed. Run #2 starts from randomly initialised weights.
+
+**2. Repository cleanup (local, no history rewrite).**
+`CodeForge-250M_win/` is now the single canonical working copy. Quarantined to `../_ATTIC/`: a stale divergent clone (`CodeForge-250M_repo`, 3 commits behind, carrying an uncommitted "Stage 20 / 1.26B resume" edit that would have continued the failed run), 69 one-off driver scripts from run #1, `repo.tar.gz`, `names.txt`, the `makeover/` bigram tutorial, a duplicate `graph-memory` clone, and the run #1 `training.log` (preserved as `_ATTIC/failed_run_training.log` for post-mortem reference). All `__pycache__` purged. Nothing tracked by git was deleted.
+
+**3. Preflight audit — 8 blockers must be fixed before run #2 launches.**
+Full detail with file:line references is in `memory.md` section 4. Summary:
+  - **B1** `download_stack.py:28-36` has no `fineweb-edu` key in `hf_mapping`; line 40 falls back to codeparrot-clean, so 0.10 weight (~235M tokens) would be downloaded twice from the same source — the same duplicate-data mechanism that caused run #1's overfitting.
+  - **B2** `train.py:157` resumes from `latest_checkpoint.pt` unless `--from_scratch` is passed, and `scripts/start_training.sh:11` passes no arguments. A stray checkpoint on the studio would silently resurrect the overfitted weights.
+  - **B3** the committed `data/tokenizer/tokenizer.json` holds only 6 of the 11 special tokens declared in `train_tokenizer.py:34-46`; `<|tool_call|>`, `<|tool_result|>`, `<|thinking|>`, `<|json_start|>`, `<|json_end|>` are missing and would be BPE-split, defeating the ReAct/tool-calling design in `serving/nexus_bridge.py`.
+  - **B4** `ShardedCodeDataset` (`train.py:47-61`) loads every shard into one Python list: ~17.5 GB host RAM for a full epoch at int64. Needs lazy loading or uint16 storage (vocab 32k fits in 16 bits).
+  - **B5** `save_steps` regressed to 100, which is 44 checkpoints x ~2.8 GB = ~123 GB. Run #1 already hit a 180 GB disk crisis; restore 1000.
+  - **B6** `filter_quality.py:59` applies Python AST validation to `commitpackft-python`, but that source is FIM-formatted (`download_stack.py:67`), so `ast.parse` rejects nearly every sample and silently zeroes the source.
+  - **B7** no validation split is built or evaluated despite `val_split` being declared in config — leaves overfitting undetectable, which is the specific failure being corrected.
+  - **B8** `deepspeed_config: configs/ds_zero2.json` is referenced but does not exist (currently harmless; `train.py` uses plain PyTorch AMP).
+  - **B9** `train_tokenizer.py:26`, `tokenize_dataset.py:36` and `train.py:64-66` all silently fall back to `data/raw/*.jsonl` when the dedup directory is empty. A failed or skipped filter/dedup stage therefore feeds raw, duplicate-heavy data straight into the tokenizer and the shards — undetected. These stages must fail loudly instead of degrading.
+
+**4. Verified correct — no action needed.** `init_model_weights` is called on the from-scratch path with correct LLaMA-2 residual scaling; loss shifting in `architecture.py:150-152` is correct; grad clipping at 1.0 is applied; `GradScaler` is correctly FP16-only; RMSNorm computes in FP32; the LR schedule matches config exactly; FIM rate is 0.50; token math checks out (`4482 x 256 x 2048 = 2,349,858,816` vs `target_tokens 2,350,000,000`, and `16 x 16 = 256` sequences/step); language weights sum to exactly 1.0.
+
+**5. Budget reality.** ~$14.17 credit remains. 2.35B tokens at RTX PRO 6000 Spot ($2.05/hr, ~300M tok/hr) costs ~$16 over ~8 hours — slightly over budget. Plan a checkpointed multi-session run and use free T4 hours for data prep.
+
+**Changed this session:** Rewrote `memory.md` to record the overfitting post-mortem and the run #2 preflight audit; quarantined run #1 artefacts to `_ATTIC/`; appended this correction. No training code changed yet — the 8 blockers are documented but unfixed.
