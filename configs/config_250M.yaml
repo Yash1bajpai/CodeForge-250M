@@ -24,13 +24,13 @@ data:
   target_tokens: 2350000000  # 2.35B unique tokens for Stage 1 relay
 
 training:
-  batch_size_per_device: 16
-  gradient_accumulation_steps: 16
+  batch_size_per_device: 8            # 16 OOMs a 14.5GB T4 in fp16; 8 + doubled accum = same tokens/step
+  gradient_accumulation_steps: 32     # 8 x 32 = 256 seqs single-GPU; 8 x 16 x 2 GPUs = 256 seqs DDP
   total_batch_size_sequences: 256  # 256 * 2048 = 524,288 tokens per step
   learning_rate: 6.0e-4
   min_learning_rate: 6.0e-5        # 10% of max LR
-  warmup_steps: 500                # ~10% of total steps
-  max_steps: 4482                  # ~2.35B tokens / 524,288 tokens per step
+  warmup_steps: 500                # ~17% of total steps
+  max_steps: 2898                  # 742,000 train seqs / 256 per step, single pass (cosine lands at exactly this)
   weight_decay: 0.1
   max_grad_norm: 1.0
   optimizer: "AdamW"
