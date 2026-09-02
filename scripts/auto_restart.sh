@@ -25,28 +25,6 @@ alert() {
   log "ALERT: $*"
   command -v termux-notification >/dev/null && termux-notification \
     --title "CodeForge training" --content "$*" 2>/dev/null
-  # ON-CALL GEMINI: fetch fresh kernel log, ask antigravity to diagnose once.
-  # It cannot wake opencode; it writes DIAGNOSIS.md for morning review.
-  TOKEN=$(cat ~/.kaggle/access_token 2>/dev/null)
-  curl -s -H "Authorization: Bearer $TOKEN" \
-    "https://www.kaggle.com/api/v1/kernels/output?user_name=yashbajpai2027&kernel_slug=codeforge-250m-train-run-2" \
-    | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin); log=d.get('logNullable','') or ''
-    lines=[e['data'].rstrip() for e in json.loads(log)]
-    open('/tmp/opencode/train_latest.log','w').write('\n'.join(lines))
-    print('kernel log saved')
-except Exception as e: print('log fetch failed:',e)" >> "$LOG" 2>&1
-  AGY=$(command -v agy || echo "$HOME/.local/bin/agy")
-  if [ -x "$AGY" ]; then
-    log "invoking on-call Gemini (antigravity) for diagnosis..."
-    timeout 900 "$AGY" -p "You are the on-call engineer for the CodeForge-250M training run on Kaggle (repo: $HOME/projects/own_llm/CodeForge-250M_win). The overnight supervisor just raised this alert: '$*'. Read /tmp/opencode/train_latest.log (the crashed kernel's log), /tmp/opencode/overnight.log (supervisor history), and the training code in the repo. Diagnose the root cause, and write a concise markdown report to /tmp/opencode/DIAGNOSIS.md with sections: ROOT CAUSE, EVIDENCE (log lines), RECOMMENDED FIX (exact file+change). Do NOT push anything to Kaggle or GitHub — diagnosis only. Keep it under 300 words." < /dev/null >> "$LOG" 2>&1
-    log "Gemini diagnosis attempt finished (see /tmp/opencode/DIAGNOSIS.md)"
-    command -v termux-notification >/dev/null && termux-notification \
-      --title "CodeForge: Gemini diagnosis ready" \
-      --content "ALERT was: $* — see DIAGNOSIS.md" 2>/dev/null
-  fi
   exit 1
 }
 
