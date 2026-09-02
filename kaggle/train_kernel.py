@@ -46,14 +46,34 @@ if not glob.glob(f"{CF}/data/tokenized/shard_*.pt") or not os.path.exists(f"{CF}
     print(f"[Kernel] staged shards: {len(glob.glob(f'{CF}/data/tokenized/shard_*.pt'))} | "
           f"tokenizer: {os.path.exists(f'{CF}/data/tokenizer/tokenizer.json')}", flush=True)
 
-# 3) checkpoint (resume or fresh)
+# 3) checkpoint (resume or fresh) — RETRY: dataset version may still be
+# processing right after a 3GB upload (caused silent 404 -> from-scratch retrain)
 ckpt_dir = f"{CF}/checkpoints/CodeForge-250M"
 os.makedirs(ckpt_dir, exist_ok=True)
+prior_progress = 0
 if not os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt"):
-    kaggle_pull(CKPT_DS, "/tmp/ckpt_in")
-    if os.path.exists("/tmp/ckpt_in/latest_checkpoint.pt"):
-        shutil.copy("/tmp/ckpt_in/latest_checkpoint.pt", ckpt_dir)
-        shutil.copy("/tmp/ckpt_in/metrics.json", CF) if os.path.exists("/tmp/ckpt_in/metrics.json") else None
+    for attempt in range(5):
+        ok = kaggle_pull(CKPT_DS, "/tmp/ckpt_in")
+        if os.path.exists("/tmp/ckpt_in/latest_checkpoint.pt"):
+            shutil.copy("/tmp/ckpt_in/latest_checkpoint.pt", ckpt_dir)
+            break
+        # does metrics say a checkpoint SHOULD exist?
+        try:
+            import json as _j
+            m = [ _j.loads(l) for l in open("/tmp/ckpt_in/metrics.json") if l.strip() ] \
+                if os.path.exists("/tmp/ckpt_in/metrics.json") else []
+            trains = [e for e in m if e.get("event") == "TRAIN"]
+            prior_progress = trains[-1]["step"] if trains else 0
+        except Exception:
+            prior_progress = 0
+        if prior_progress == 0:
+            break  # genuinely fresh run, no checkpoint expected
+        print(f"[Kernel] ckpt pull attempt {attempt+1} failed (progress=step {prior_progress}); waiting 90s...", flush=True)
+        import time as _t; _t.sleep(90)
+    if prior_progress > 0 and not os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt"):
+        raise SystemExit(f"FATAL: training previously reached step {prior_progress} but checkpoint is unavailable after 5 pulls. Refusing to retrain from scratch (quota protection).")
+if os.path.exists("/tmp/ckpt_in/metrics.json") and not os.path.exists(f"{CF}/metrics.json"):
+    shutil.copy("/tmp/ckpt_in/metrics.json", CF)
 
 # decide resume vs fresh
 args = ["--resume"] if os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt") else ["--from_scratch"]

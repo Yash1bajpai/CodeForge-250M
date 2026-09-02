@@ -79,17 +79,19 @@ EOF
 
   case "$DEC" in
     ACTION=RESTART*)
-      # crash-loop guard: if we pushed <20 min ago and it already died, count it
+      # crash-loop guard: ONLY fast failures burn the budget. A session that
+      # ran >=30 min (e.g. the 11h wall-clock) is healthy; reset the counter.
       now=$(date +%s)
-      if [ $((now - last_push_ts)) -lt 1200 ]; then
-        restarts=$((restarts + 2))
-      else
+      if [ "$last_push_ts" -gt 0 ] && [ $((now - last_push_ts)) -lt 1800 ]; then
         restarts=$((restarts + 1))
+        log "fast failure detected (up <$((1800/60)) min) — budget now $restarts/$MAX_RESTARTS"
+      else
+        restarts=0
       fi
       if [ "$restarts" -ge "$MAX_RESTARTS" ]; then
-        alert "Restart budget exhausted ($restarts). Last: $DEC"
+        alert "Crash loop: $MAX_RESTARTS fast failures in a row. Last: $DEC"
       fi
-      log "re-pushing kernel (resume) — restart #$restarts"
+      log "re-pushing kernel (resume) — budget $restarts/$MAX_RESTARTS"
       (cd "$PUSH_DIR" && kaggle kernels push -p . >> "$LOG" 2>&1)
       last_push_ts=$(date +%s)
       ;;
