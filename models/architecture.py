@@ -138,18 +138,25 @@ class CodeForgeModel(nn.Module):
     def forward(self, input_ids: torch.Tensor, labels: torch.Tensor = None):
         bsz, seq_len = input_ids.shape
         hidden_states = self.embed_tokens(input_ids)
-        
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, attention_mask=None)  # SDPA handles causal masking natively!
-            
+
+        # Gradient checkpointing (T4 VRAM): recompute layer activations in
+        # backward instead of storing all 16 layers (~10x activation savings).
+        if getattr(self, "gradient_checkpointing", False) and self.training:
+            for layer in self.layers:
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    layer, hidden_states, use_reentrant=False)
+        else:
+            for layer in self.layers:
+                hidden_states = layer(hidden_states, attention_mask=None)
+
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss = F.cross_entropy(shift_logits.view(-1, self.vocab_size), shift_labels.view(-1))
+            shift_logits = logits[..., :-1, :]
+            shift_labels = labels[..., 1:]
+            loss = F.cross_entropy(shift_logits.reshape(-1, self.vocab_size), shift_labels.reshape(-1))
             
         return logits, loss
 

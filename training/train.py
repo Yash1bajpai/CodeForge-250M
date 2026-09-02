@@ -197,7 +197,9 @@ def train():
     print(f"--> [B7] {len(train_shards)} train shards / {len(val_shards)} val shards (0.5% held out)")
 
     model = CodeForgeModel(cfg).to(device)
-    print(f"--> Parameters: {model.get_parameter_count():,}")
+    # T4 VRAM: recompute activations in backward (~10x activation reduction)
+    model.gradient_checkpointing = True
+    print(f"--> Parameters: {model.get_parameter_count():,} | grad_checkpointing=True")
 
     # DDP wrap: gradient sync across T4s. device_ids=[local], single process per GPU.
     if is_ddp:
@@ -344,8 +346,9 @@ def train():
                 if is_main:
                     ppl = math.exp(min(loss_val, 20.0))
                     vram_gb = torch.cuda.memory_allocated() / (1024**3)
+                    peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
                     elapsed = time.time() - start_time
-                    print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {current_lr:<10.2e} | {vram_gb:<10.2f} | {elapsed/60:.0f}m", flush=True)
+                    print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {current_lr:<10.2e} | {vram_gb:<6.2f}/{peak_gb:<6.2f} | {elapsed/60:.0f}m", flush=True)
                     append_metric(metrics_path, {
                         "event": "TRAIN", "step": step, "loss": round(loss_val, 4),
                         "ppl": round(ppl, 2), "lr": current_lr, "tokens_seen": tokens_seen,
