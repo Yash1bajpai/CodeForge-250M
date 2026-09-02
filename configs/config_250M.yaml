@@ -19,8 +19,8 @@ data:
   train_split: "train"
   val_split: "validation"
   num_workers: 4
-  languages: ["starcoder-python", "codeparrot-clean", "fineweb-edu", "tiny-textbooks", "evol-codealpaca", "glaive-function-calling", "commitpackft-python"]
-  language_weights: [0.53, 0.21, 0.10, 0.075, 0.05, 0.025, 0.01]
+  languages: ["starcoder-python", "codeparrot-clean", "fineweb-edu", "evol-codealpaca", "glaive-function-calling", "commitpackft-python"]
+  language_weights: [0.56, 0.22, 0.135, 0.053, 0.025, 0.007]  # tiny-textbooks dropped (HF gated-403); weight split: starcoder +0.03, codeparrot +0.01, fineweb +0.035, evol +0.003
   target_tokens: 2350000000  # 2.35B unique tokens for Stage 1 relay
 
 training:
