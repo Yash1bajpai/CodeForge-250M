@@ -66,13 +66,13 @@ def build_tokenized_dataset(dedup_dir: str = "data/dedup", tokenizer_dir: str = 
                     if len(current_shard) >= shard_size:
                         shard_idx = chunk_count // shard_size
                         out_path = os.path.join(output_dir, f"shard_{shard_idx:04d}.pt")
-                        torch.save(torch.tensor(current_shard, dtype=torch.long), out_path)
+                        torch.save(torch.tensor(current_shard, dtype=torch.uint16), out_path)
                         current_shard = []
                         
     if current_shard:
         shard_idx = chunk_count // shard_size if chunk_count % shard_size == 0 else (chunk_count // shard_size) + 1
         out_path = os.path.join(output_dir, f"shard_{shard_idx:04d}.pt")
-        torch.save(torch.tensor(current_shard, dtype=torch.long), out_path)
+        torch.save(torch.tensor(current_shard, dtype=torch.uint16), out_path)
         
     print(f"    --> Successfully saved {chunk_count:,} tokenized sequences ({chunk_count * seq_len:,} tokens) across shards in {output_dir}!")
 

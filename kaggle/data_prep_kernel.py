@@ -66,9 +66,14 @@ if not os.path.exists(f"{CF}/data/tokenizer/tokenizer.json"):
 
 # stage 5: tokenize to uint16 shards (fixed random seed for the 50% FIM split)
 subprocess.run([sys.executable, f"{CF}/data/tokenize_dataset.py"], cwd=CF, check=False)
-
-# report + push everything
 n_shards = len(glob.glob(f"{CF}/data/tokenized/shard_*.pt"))
+# dedup consumed by tokenize: free its ~8GB before the upload
+if n_shards > 0:
+    _sh.rmtree(f"{CF}/data/dedup", ignore_errors=True)
+print(f"[disk] after tokenize (dedup deleted): {_dirsize('/kaggle/working')/1e9:.1f} GB", flush=True)
+
+# report + push: only what training needs (tokenized + tokenizer), directly from
+# the working dir — no /tmp copies (tmpfs copy of GBs can OOM the session).
 print(f"=== [Data-prep] {n_shards} shards ready ===", flush=True)
 
 meta = f"""{{
@@ -76,15 +81,9 @@ meta = f"""{{
   "id": "{DATA_DS}",
   "licenses": [{{"name": "CC0-1.0"}}]
 }}"""
-os.makedirs("/tmp/data_out", exist_ok=True)
-with open("/tmp/data_out/dataset-metadata.json", "w") as f:
+with open(f"{CF}/data/dataset-metadata.json", "w") as f:
     f.write(meta)
-for sub in ["raw", "filtered", "dedup", "tokenizer", "tokenized"]:
-    src = f"{CF}/data/{sub}"
-    if os.path.isdir(src) and glob.glob(f"{src}/*"):
-        os.makedirs(f"/tmp/data_out/{sub}", exist_ok=True)
-        for f in glob.glob(f"{src}/*"):
-            shutil.copy(f, f"/tmp/data_out/{sub}/")
-r = subprocess.run(["kaggle", "datasets", "version", "-p", "/tmp/data_out",
+# keep ONLY push dirs inside data/ — remove stray metadata json from glob paths above
+r = subprocess.run(["kaggle", "datasets", "version", "-p", f"{CF}/data",
                     "-m", f"prep-state-{n_shards}-shards", "--dir-mode", "zip"])
 print(f"=== [Data-prep] push rc={r.returncode} ===", flush=True)
