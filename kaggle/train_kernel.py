@@ -24,17 +24,26 @@ if not os.path.exists(f"{CF}/training/train.py"):
     subprocess.run(["git", "clone", "-q",
                     "https://github.com/Yash1bajpai/CodeForge-250M.git", CF], check=False)
 
-# 2) tokenized data + tokenizer
-if not glob.glob(f"{CF}/data/tokenized/shard_*.pt"):
-    kaggle_pull(DATA_DS, f"{CF}/data/tokenized")
-# tokenizer lives in the same dataset under tokenizer/
-os.makedirs(f"{CF}/data/tokenizer", exist_ok=True)
-if not os.path.exists(f"{CF}/data/tokenizer/tokenizer.json"):
-    for src in glob.glob(f"{CF}/data/tokenized/tokenizer/*"):
-        shutil.copy(src, f"{CF}/data/tokenizer/")
-    # remove non-shard files from tokenized dir
-    for f in glob.glob(f"{CF}/data/tokenized/tokenizer"):
-        shutil.rmtree(f, ignore_errors=True)
+# 2) tokenized data + tokenizer: pull dataset to a STAGING dir, then place
+# subdirs where train.py expects them (dataset zip contains tokenized/ + tokenizer/)
+if not glob.glob(f"{CF}/data/tokenized/shard_*.pt") or not os.path.exists(f"{CF}/data/tokenizer/tokenizer.json"):
+    kaggle_pull(DATA_DS, "/tmp/data_staging")
+    import shutil as _sh2
+    # case A: zip has top-level subdirs (tokenized/, tokenizer/)
+    for sub in ["tokenized", "tokenizer"]:
+        src = f"/tmp/data_staging/{sub}"
+        dst = f"{CF}/data/{sub}"
+        if os.path.isdir(src):
+            os.makedirs(dst, exist_ok=True)
+            for f in glob.glob(f"{src}/*"):
+                _sh2.copy(f, dst)
+    # case B: zip was dir-mode-zip of data/ — files may sit at top level of staging
+    if not glob.glob(f"{CF}/data/tokenized/shard_*.pt"):
+        for f in glob.glob("/tmp/data_staging/shard_*.pt"):
+            os.makedirs(f"{CF}/data/tokenized", exist_ok=True)
+            _sh2.copy(f, f"{CF}/data/tokenized/")
+    print(f"[Kernel] staged shards: {len(glob.glob(f'{CF}/data/tokenized/shard_*.pt'))} | "
+          f"tokenizer: {os.path.exists(f'{CF}/data/tokenizer/tokenizer.json')}", flush=True)
 
 # 3) checkpoint (resume or fresh)
 ckpt_dir = f"{CF}/checkpoints/CodeForge-250M"
