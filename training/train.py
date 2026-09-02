@@ -99,10 +99,10 @@ def append_metric(metrics_path, entry):
     with open(metrics_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
-def save_checkpoint(model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2):
+def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2):
     state = {
         'step': step,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': raw_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss_val,
         'val_loss': val_loss,
@@ -129,19 +129,34 @@ def train():
     parser.add_argument("--max_hours", type=float, default=11.0, help="Wall-clock budget before clean stop (Kaggle ~12h limit)")
     args = parser.parse_args()
 
-    log_path = os.path.join(PROJECT_ROOT, "training.log")
-    sys.stdout = Logger(log_path)
+    # --- DDP setup (Kaggle T4 x2): env vars set by torchrun ---
+    ddp_world = int(os.environ.get("WORLD_SIZE", "1"))
+    ddp_rank = int(os.environ.get("RANK", "0"))
+    ddp_local = int(os.environ.get("LOCAL_RANK", "0"))
+    is_ddp = ddp_world > 1
+    if is_ddp:
+        import torch.distributed as dist
+        torch.cuda.set_device(ddp_local)
+        dist.init_process_group(backend="nccl")
+        device = torch.device(f"cuda:{ddp_local}")
+    else:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    is_main = (ddp_rank == 0)
 
-    print("=== [CODEFORGE-250M RUN #2 — FRESH, SINGLE-PASS, WATCHED] ===")
+    log_path = os.path.join(PROJECT_ROOT, "training.log")
+    if is_main:
+        sys.stdout = Logger(log_path)
+
+    mode = f"DDP x{ddp_world}" if is_ddp else "SINGLE"
+    print(f"=== [CODEFORGE-250M RUN #2 — FRESH, SINGLE-PASS, WATCHED — {mode}] ===")
 
     if not torch.cuda.is_available():
         print("ERROR: CUDA GPU is not available!")
         return
 
-    device = torch.device("cuda:0")
     cap = torch.cuda.get_device_capability(0)
     dtype = torch.float16 if cap[0] < 8 else torch.bfloat16
-    print(f"--> Hardware: {torch.cuda.get_device_name(0)} | dtype={dtype}")
+    print(f"--> Hardware: {torch.cuda.get_device_name(0)} | dtype={dtype} | world={ddp_world}")
 
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
@@ -155,6 +170,10 @@ def train():
 
     batch_size_per_device = train_cfg.get("batch_size_per_device", 16)
     accum_steps = train_cfg.get("gradient_accumulation_steps", 16)
+    # DDP: per-device batch x world must give the SAME total tokens/step (524,288).
+    # single: 16 x 16 accum = 256 seqs. 2x T4: 16 x 8 accum x 2 gpus = 256 seqs.
+    if is_ddp:
+        accum_steps = max(1, accum_steps // ddp_world)
     max_steps = train_cfg.get("max_steps", 4482)
     max_lr = float(train_cfg.get("learning_rate", 6.0e-4))
     min_lr = float(train_cfg.get("min_learning_rate", 6.0e-5))
@@ -180,6 +199,14 @@ def train():
     model = CodeForgeModel(cfg).to(device)
     print(f"--> Parameters: {model.get_parameter_count():,}")
 
+    # DDP wrap: gradient sync across T4s. device_ids=[local], single process per GPU.
+    if is_ddp:
+        import torch.distributed as dist
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local])
+        raw_model = model.module
+    else:
+        raw_model = model
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr,
                                   weight_decay=train_cfg.get("weight_decay", 0.1),
                                   betas=(0.9, 0.95))
@@ -192,7 +219,7 @@ def train():
         if not os.path.exists(latest_path):
             raise SystemExit("ERROR: --resume passed but no latest_checkpoint.pt found.")
         ckpt = torch.load(latest_path, map_location=device)
-        model.load_state_dict(ckpt['model_state_dict'])
+        raw_model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         start_step = ckpt.get('step', 0)
         loss_val = ckpt.get('loss', 0.0)
@@ -204,7 +231,7 @@ def train():
     else:
         if args.from_scratch and os.path.exists(latest_path):
             os.remove(latest_path)
-        init_model_weights(model, initializer_range=0.02)
+        init_model_weights(raw_model, initializer_range=0.02)
         print("--> [From Scratch] Fresh random init at step 0")
 
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
@@ -212,8 +239,16 @@ def train():
                                      seq_length=seq_len, shard_files=train_shards)
     val_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
                                    seq_length=seq_len, shard_files=val_shards)
-    dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device, shuffle=True,
-                            num_workers=2, pin_memory=True, drop_last=True)
+    if is_ddp:
+        import torch.distributed as dist
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=ddp_world, rank=ddp_rank, shuffle=True, drop_last=True)
+        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
+                                sampler=train_sampler, num_workers=2, pin_memory=True, drop_last=True)
+    else:
+        train_sampler = None
+        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device, shuffle=True,
+                                num_workers=2, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
                             num_workers=1, pin_memory=True, drop_last=True)
 
@@ -224,8 +259,8 @@ def train():
             break
 
     total_train_seqs = len(train_dataset)
-    seqs_per_step = batch_size_per_device * accum_steps
-    if total_train_seqs < seqs_per_step * max_steps:
+    seqs_per_step = batch_size_per_device * accum_steps * ddp_world
+    if total_train_seqs < seqs_per_step * max_steps and is_main:
         print(f"WARNING: corpus holds {total_train_seqs:,} seqs but {max_steps} steps x {seqs_per_step} seqs/step "
               f"= {seqs_per_step * max_steps:,} needed. Single-pass will fall short — trim max_steps or add data.")
 
@@ -306,36 +341,39 @@ def train():
                 loss_floor_strikes = 0
 
             if step % 5 == 0 or step_offset == 1:
-                ppl = math.exp(min(loss_val, 20.0))
-                vram_gb = torch.cuda.memory_allocated() / (1024**3)
-                elapsed = time.time() - start_time
-                print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {current_lr:<10.2e} | {vram_gb:<10.2f} | {elapsed/60:.0f}m", flush=True)
-                append_metric(metrics_path, {
-                    "event": "TRAIN", "step": step, "loss": round(loss_val, 4),
-                    "ppl": round(ppl, 2), "lr": current_lr, "tokens_seen": tokens_seen,
-                    "ts": time.time()})
+                if is_main:
+                    ppl = math.exp(min(loss_val, 20.0))
+                    vram_gb = torch.cuda.memory_allocated() / (1024**3)
+                    elapsed = time.time() - start_time
+                    print(f"{step:<6} | {loss_val:<8.4f} | {ppl:<10.2f} | {current_lr:<10.2e} | {vram_gb:<10.2f} | {elapsed/60:.0f}m", flush=True)
+                    append_metric(metrics_path, {
+                        "event": "TRAIN", "step": step, "loss": round(loss_val, 4),
+                        "ppl": round(ppl, 2), "lr": current_lr, "tokens_seen": tokens_seen,
+                        "ts": time.time()})
 
             # B7: validation cadence + divergence kill
             if step % val_steps == 0:
-                val_loss = evaluate_val_loss(model, val_batches, device, dtype)
-                val_history.append(val_loss)
-                print(f"--> [VAL] step {step}: val_loss={val_loss:.4f} (train {loss_val:.4f})", flush=True)
-                append_metric(metrics_path, {"event": "VAL", "step": step,
-                                             "val_loss": round(val_loss, 4),
-                                             "train_loss": round(loss_val, 4), "ts": time.time()})
-                # run #1 killer #3: val rising 3 evals in a row while train falls = overfit
-                if len(val_history) >= 4:
-                    last4 = val_history[-4:]
-                    rising = last4[0] < last4[1] < last4[2] < last4[3]
-                    if rising:
-                        watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in last4]})
-                        break
+                val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
+                if is_main:
+                    val_history.append(val_loss)
+                    print(f"--> [VAL] step {step}: val_loss={val_loss:.4f} (train {loss_val:.4f})", flush=True)
+                    append_metric(metrics_path, {"event": "VAL", "step": step,
+                                                 "val_loss": round(val_loss, 4),
+                                                 "train_loss": round(loss_val, 4), "ts": time.time()})
+                    # run #1 killer #3: val rising 3 evals in a row while train falls = overfit
+                    if len(val_history) >= 4:
+                        last4 = val_history[-4:]
+                        rising = last4[0] < last4[1] < last4[2] < last4[3]
+                        if rising:
+                            watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in last4]})
+                            break
 
             if step % save_steps == 0 or step == max_steps:
-                step_path = save_checkpoint(model, optimizer, step, loss_val, val_loss,
-                                            ckpt_dir, latest_path)
-                print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
-                append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
+                if is_main:
+                    step_path = save_checkpoint(raw_model, optimizer, step, loss_val, val_loss,
+                                                ckpt_dir, latest_path)
+                    print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
+                    append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
 
             stop_file = os.path.join(PROJECT_ROOT, "STOP_AND_SAVE")
             if os.path.exists(stop_file):
@@ -346,10 +384,14 @@ def train():
                 watchdog_write("STOP_AND_SAVE_SIGNAL")
                 break
     finally:
-        if batch_generator is not None and step > start_step:
-            save_checkpoint(model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path)
+        if batch_generator is not None and step > start_step and is_main:
+            save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path)
             print(f"--> [Final] checkpoint saved at step {step}", flush=True)
             append_metric(metrics_path, {"event": "FINAL", "step": step, "ts": time.time()})
+        if is_ddp:
+            import torch.distributed as dist
+            dist.barrier()
+            dist.destroy_process_group()
 
     elapsed = time.time() - start_time
     print(f"--> [DONE] step {step} | {tokens_seen:,} tokens in {elapsed/60:.1f} min "
