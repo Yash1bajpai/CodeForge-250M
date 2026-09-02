@@ -60,9 +60,33 @@ subprocess.run([sys.executable, f"{CF}/data/deduplicate.py"], cwd=CF, check=Fals
 _sh.rmtree(f"{CF}/data/filtered", ignore_errors=True)     # filtered consumed by dedup
 print(f"[disk] after dedup (filtered deleted): {_dirsize('/kaggle/working')/1e9:.1f} GB", flush=True)
 
-# stage 4: tokenizer only if not yet trained (B3: all 11 special tokens)
-if not os.path.exists(f"{CF}/data/tokenizer/tokenizer.json"):
+# stage 4: tokenizer — train fresh UNLESS the restored one passes the 11-token check
+REQUIRED_SPECIALS = ["<|endoftext|>", "<|unk|>", "<|pad|>", "<|fim_prefix|>", "<|fim_middle|>",
+                     "<|fim_suffix|>", "<|tool_call|>", "<|tool_result|>", "<|thinking|>",
+                     "<|json_start|>", "<|json_end|>"]
+
+def tokenizer_is_valid(path):
+    if not os.path.exists(path):
+        return False
+    try:
+        import json as _json
+        d = _json.load(open(path))
+        names = [a["content"] for a in d.get("added_tokens", [])]
+        return all(t in names for t in REQUIRED_SPECIALS)
+    except Exception:
+        return False
+
+tok_path = f"{CF}/data/tokenizer/tokenizer.json"
+if not tokenizer_is_valid(tok_path):
+    if os.path.exists(tok_path):
+        print("[Tokenizer] restored tokenizer FAILED 11-token check — retraining", flush=True)
+    _sh.rmtree(f"{CF}/data/tokenizer", ignore_errors=True)
     subprocess.run([sys.executable, f"{CF}/data/train_tokenizer.py"], cwd=CF, check=False)
+# HARD GATE: refuse to tokenize with a broken tokenizer
+if not tokenizer_is_valid(tok_path):
+    raise SystemExit("FATAL: tokenizer still missing special tokens after training. "
+                     "Refusing to build shards (run #1 B3 bug).")
+print("[Tokenizer] verified: all 11 special tokens present", flush=True)
 
 # stage 5: tokenize to uint16 shards (fixed random seed for the 50% FIM split)
 subprocess.run([sys.executable, f"{CF}/data/tokenize_dataset.py"], cwd=CF, check=False)
