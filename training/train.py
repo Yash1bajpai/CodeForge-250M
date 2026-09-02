@@ -314,7 +314,8 @@ def train():
                     scaled_loss = loss / accum_steps
                 scaler.scale(scaled_loss).backward()
                 step_loss += loss.item() / accum_steps
-                tokens_seen += x.numel()
+                # GLOBAL token count: per-rank numel x world (x is seq[:-1] = 2047 tok)
+                tokens_seen += x.numel() * ddp_world
             if batch_generator is None:
                 break
 
@@ -325,8 +326,9 @@ def train():
             optimizer.zero_grad()
             loss_val = step_loss
 
-            # TOKEN ACCOUNTANT (run #1 killer #1): real tokens/step must match config
-            expected_tokens_per_step = seqs_per_step * seq_len
+            # TOKEN ACCOUNTANT (run #1 killer #1): real tokens/step must match config.
+            # x carries seq[:-1] (2047 of 2048 tokens) — 0.05% under is expected.
+            expected_tokens_per_step = seqs_per_step * seq_len * (1 - 1.0 / seq_len)
             actual = tokens_seen / step_offset
             if step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step:
                 watchdog_write("TOKEN_COUNT_MISMATCH",
