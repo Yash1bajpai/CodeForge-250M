@@ -24,8 +24,8 @@ data:
   target_tokens: 2350000000  # 2.35B unique tokens for Stage 1 relay
 
 training:
-  batch_size_per_device: 8            # 16 OOMs a 14.5GB T4 in fp16; 8 + doubled accum = same tokens/step
-  gradient_accumulation_steps: 32     # 8 x 32 = 256 seqs single-GPU; 8 x 16 x 2 GPUs = 256 seqs DDP
+  batch_size_per_device: 4            # T4 14.5GB fp16: batch 8 still OOMs (act ~8GB + AdamW 3GB + logits 2GB); 4 fits with headroom
+  gradient_accumulation_steps: 64     # 4 x 64 = 256 seqs single-GPU; 4 x 32 x 2 GPUs = 256 seqs DDP
   total_batch_size_sequences: 256  # 256 * 2048 = 524,288 tokens per step
   learning_rate: 6.0e-4
   min_learning_rate: 6.0e-5        # 10% of max LR

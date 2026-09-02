@@ -9,6 +9,7 @@ DATA_DS = os.environ.get("KAGGLE_DATA_DATASET", "yashbajpai2027/codeforge-data")
 
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 print("=== [Kernel] boot: pulling latest code + data + checkpoint ===", flush=True)
 subprocess.run(["pip", "install", "-q", "kaggle"])  # usually preinstalled
