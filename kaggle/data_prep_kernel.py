@@ -9,6 +9,14 @@ CF = "/kaggle/working/CodeForge-250M"
 DATA_DS = os.environ.get("KAGGLE_DATA_DATASET", "yashbajpai2027/codeforge-data")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# HF token injected at push time via env; kernel reads it from KAGGLE secrets-free env
+os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
+if not os.environ["HF_TOKEN"]:
+    # fallback: token file bundled with the kernel push
+    _tok_file = "/kaggle/working/hf_token.txt"
+    if os.path.exists(_tok_file):
+        os.environ["HF_TOKEN"] = open(_tok_file).read().strip()
+        os.environ["HF_TOKEN"] = os.environ["HF_TOKEN"]
 
 print("=== [Data-prep kernel] boot ===", flush=True)
 
@@ -30,7 +38,8 @@ for sub in ["raw", "filtered", "dedup", "tokenizer", "tokenized"]:
         for f in glob.glob(f"{src}/*"):
             shutil.copy(f, dst)
 
-subprocess.run(["pip", "install", "-q", "datasets", "tokenizers", "transformers", "tiktoken"], check=False)
+# datasets 3.x dropped script-loading (commitpackft needs 2.x); pin BEFORE imports in pipeline
+subprocess.run(["pip", "install", "-q", "datasets==2.21.0", "tokenizers", "transformers", "tiktoken"], check=False)
 
 # stages 1-3: download -> filter -> dedup (all CPU, all streaming)
 subprocess.run([sys.executable, f"{CF}/data/download_stack.py"], cwd=CF, check=False)

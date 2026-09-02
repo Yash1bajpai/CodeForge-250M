@@ -26,7 +26,7 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
     print(f"--> [Data Pipeline] Starting Production Multi-Source Streaming Download (Target Tokens: {target_tokens:,})...")
     
     hf_mapping = {
-        "starcoder-python": ("bigcode/starcoderdata", "python", "content"),
+        "starcoder-python": ("bigcode/starcoderdata", "PARQUET:python", "content"),
         "glaive-function-calling": ("glaiveai/glaive-function-calling-v2", None, "system_and_chat"),
         "codeparrot-clean": ("codeparrot/codeparrot-clean-train", None, "content"),
         "fineweb-edu": ("HuggingFaceFW/fineweb-edu", "sample-10BT", "text"),
@@ -34,23 +34,52 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
         "tiny-textbooks": ("nampdn-ai/tiny-textbooks", None, "text"),
         "commitpackft-python": ("bigcode/commitpackft", "python", "diff"),
     }
-    
+
+    def stream_parquet_dir(repo, subdir):
+        """datasets 3.x removed starcoderdata's per-language configs; stream its
+        per-language parquet directory directly. Returns an iterable of rows."""
+        import requests
+        from datasets import load_dataset
+        token = os.environ.get("HF_TOKEN") or None
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        api = f"https://huggingface.co/api/datasets/{repo}/tree/main/{subdir}"
+        files = [f["path"] for f in requests.get(api, headers=headers).json()
+                 if f["path"].endswith(".parquet")]
+        print(f"    [Parquet] {len(files)} parquet files in {repo}/{subdir}")
+        for fp in files:
+            url = f"https://huggingface.co/datasets/{repo}/resolve/main/{fp}"
+            ds = load_dataset("parquet", data_files=url, split="train",
+                              streaming=True, token=token)
+            for row in ds:
+                yield row
+
     for src, max_chars in target_chars_per_src.items():
         print(f"    Fetching {src} (Target chars: {max_chars:,})...")
         if src not in hf_mapping:
             raise SystemExit(f"ERROR: source '{src}' has no hf_mapping entry. Refusing to fall back to another dataset (run #1 overfitting cause).")
         repo, subset, mode = hf_mapping[src]
-        
+
+        out_file = os.path.join(output_dir, f"{src}_raw.jsonl")
+        # RESUME: skip sources already (mostly) downloaded in a previous session
+        if os.path.exists(out_file) and os.path.getsize(out_file) >= 0.97 * max_chars:
+            print(f"    [Resume] {src} already downloaded ({os.path.getsize(out_file):,} chars). Skipping.")
+            continue
+
         try:
-            if subset:
-                ds = load_dataset(repo, subset, split="train", streaming=True, token=os.environ.get("HF_TOKEN") or None)
+            if isinstance(subset, str) and subset.startswith("PARQUET:"):
+                ds = stream_parquet_dir(repo, subset.split(":", 1)[1])
+            elif subset:
+                ds = load_dataset(repo, subset, split="train", streaming=True,
+                                  token=os.environ.get("HF_TOKEN") or None,
+                                  trust_remote_code=True)
             else:
-                ds = load_dataset(repo, split="train", streaming=True, token=os.environ.get("HF_TOKEN") or None)
+                ds = load_dataset(repo, split="train", streaming=True,
+                                  token=os.environ.get("HF_TOKEN") or None,
+                                  trust_remote_code=True)
         except Exception as e:
             print(f"    [Warning] Could not stream {repo} ({e}). Skipping source to avoid fallback contamination.")
             continue
-            
-        out_file = os.path.join(output_dir, f"{src}_raw.jsonl")
+
         char_count = 0
         with open(out_file, "w", encoding="utf-8") as out_f:
             for sample in ds:

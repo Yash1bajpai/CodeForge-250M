@@ -5,6 +5,8 @@ import random
 import torch
 from transformers import PreTrainedTokenizerFast
 
+random.seed(42)  # deterministic FIM splits -> identical shards on re-runs (resume safety)
+
 def apply_fim_transformation(code: str, fim_rate: float = 0.50) -> str:
     """
     Applies Fill-In-the-Middle (FIM) transformation at a 50% rate (StarCoder / DeepSeek-Coder standard).
