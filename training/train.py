@@ -287,13 +287,21 @@ def train():
     steps_planned = max_steps - start_step
 
     step = start_step
+    epoch_done = False
     try:
         for step_offset in range(1, steps_planned + 1):
             step = start_step + step_offset
 
-            # clock guard: clean stop before the wall kills us
-            if (time.time() - start_time) / 3600.0 >= args.max_hours:
-                watchdog_write("WALL_CLOCK_BUDGET")
+            # clock guard: clean stop before the wall kills us (rank0 decides,
+            # broadcasts; both ranks break together to avoid NCCL desync)
+            wall_hit = (time.time() - start_time) / 3600.0 >= args.max_hours
+            if is_ddp:
+                t = torch.tensor([1 if wall_hit else 0], device=device)
+                torch.distributed.all_reduce(t)
+                wall_hit = t.item() > 0
+            if wall_hit:
+                if is_main:
+                    watchdog_write("WALL_CLOCK_BUDGET")
                 break
 
             current_lr = get_lr_cosine_schedule(step, warmup_steps, max_steps, max_lr, min_lr)
@@ -305,7 +313,7 @@ def train():
                 try:
                     x, y = next(batch_generator)
                 except StopIteration:
-                    watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
+                    epoch_done = True
                     batch_generator = None
                     break
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
@@ -316,7 +324,14 @@ def train():
                 step_loss += loss.item() / accum_steps
                 # GLOBAL token count: per-rank numel x world (x is seq[:-1] = 2047 tok)
                 tokens_seen += x.numel() * ddp_world
-            if batch_generator is None:
+            epoch_done = (batch_generator is None)
+            if is_ddp:
+                t = torch.tensor([1 if epoch_done else 0], device=device)
+                torch.distributed.all_reduce(t)
+                epoch_done = t.item() > 0
+            if epoch_done:
+                if is_main:
+                    watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
                 break
 
             scaler.unscale_(optimizer)
@@ -330,19 +345,32 @@ def train():
             # x carries seq[:-1] (2047 of 2048 tokens) — 0.05% under is expected.
             expected_tokens_per_step = seqs_per_step * seq_len * (1 - 1.0 / seq_len)
             actual = tokens_seen / step_offset
-            if step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step:
-                watchdog_write("TOKEN_COUNT_MISMATCH",
-                               {"expected": expected_tokens_per_step, "actual": actual})
+            mismatch = step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step
+            if is_ddp:
+                t = torch.tensor([1 if mismatch else 0], device=device)
+                torch.distributed.all_reduce(t)
+                mismatch = t.item() > 0
+            if mismatch:
+                if is_main:
+                    watchdog_write("TOKEN_COUNT_MISMATCH",
+                                   {"expected": expected_tokens_per_step, "actual": actual})
                 break
 
             # LOSS FLOOR (run #1 killer #3): ppl < 1.5 mid-run = memorization signature
             if loss_val < math.log(1.5):
                 loss_floor_strikes += 1
-                if loss_floor_strikes >= 3:
-                    watchdog_write("LOSS_FLOOR_MEMORIZATION", {"loss": loss_val})
-                    break
+                floor_hit = loss_floor_strikes >= 3
             else:
                 loss_floor_strikes = 0
+                floor_hit = False
+            if is_ddp:
+                t = torch.tensor([1 if floor_hit else 0], device=device)
+                torch.distributed.all_reduce(t)
+                floor_hit = t.item() > 0
+            if floor_hit:
+                if is_main:
+                    watchdog_write("LOSS_FLOOR_MEMORIZATION", {"loss": loss_val})
+                break
 
             if step % 5 == 0 or step_offset == 1:
                 if is_main:
@@ -356,7 +384,9 @@ def train():
                         "ppl": round(ppl, 2), "lr": current_lr, "tokens_seen": tokens_seen,
                         "ts": time.time()})
 
-            # B7: validation cadence + divergence kill
+            # B7: validation cadence + divergence kill. BOTH ranks evaluate (keeps
+            # collectives symmetric); rank0 decides, broadcasts, both break together.
+            val_diverged = False
             if step % val_steps == 0:
                 val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
                 if is_main:
@@ -365,13 +395,17 @@ def train():
                     append_metric(metrics_path, {"event": "VAL", "step": step,
                                                  "val_loss": round(val_loss, 4),
                                                  "train_loss": round(loss_val, 4), "ts": time.time()})
-                    # run #1 killer #3: val rising 3 evals in a row while train falls = overfit
                     if len(val_history) >= 4:
                         last4 = val_history[-4:]
-                        rising = last4[0] < last4[1] < last4[2] < last4[3]
-                        if rising:
+                        if last4[0] < last4[1] < last4[2] < last4[3]:
                             watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in last4]})
-                            break
+                            val_diverged = True
+            if is_ddp:
+                t = torch.tensor([1 if val_diverged else 0], device=device)
+                torch.distributed.all_reduce(t)
+                val_diverged = t.item() > 0
+            if val_diverged:
+                break
 
             if step % save_steps == 0 or step == max_steps:
                 if is_main:
@@ -380,13 +414,22 @@ def train():
                     print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
                     append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
 
-            stop_file = os.path.join(PROJECT_ROOT, "STOP_AND_SAVE")
-            if os.path.exists(stop_file):
-                try:
-                    os.remove(stop_file)
-                except OSError:
-                    pass
-                watchdog_write("STOP_AND_SAVE_SIGNAL")
+            stop_requested = False
+            if is_main:
+                stop_file = os.path.join(PROJECT_ROOT, "STOP_AND_SAVE")
+                if os.path.exists(stop_file):
+                    try:
+                        os.remove(stop_file)
+                    except OSError:
+                        pass
+                    stop_requested = True
+            if is_ddp:
+                t = torch.tensor([1 if stop_requested else 0], device=device)
+                torch.distributed.all_reduce(t)
+                stop_requested = t.item() > 0
+            if stop_requested:
+                if is_main:
+                    watchdog_write("STOP_AND_SAVE_SIGNAL")
                 break
     finally:
         if batch_generator is not None and step > start_step and is_main:
