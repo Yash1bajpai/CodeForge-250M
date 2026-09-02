@@ -23,7 +23,7 @@ def train_custom_bpe_tokenizer(data_dir: str = "data/dedup", output_dir: str = "
     os.makedirs(output_dir, exist_ok=True)
     files = glob.glob(os.path.join(data_dir, "*_dedup.jsonl"))
     if not files:
-        files = glob.glob(os.path.join("data", "raw", "*.jsonl"))
+        raise SystemExit(f"ERROR: no dedup files in {data_dir}. Run filter_quality.py and deduplicate.py first. Refusing to fall back to raw unfiltered data (run #1 overfitting cause).")
 
     print(f"--> [Tokenizer] Training 32k BPE Tokenizer with ReAct & FIM tokens on {len(files)} files...")
     

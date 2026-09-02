@@ -10,8 +10,8 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
     os.makedirs(output_dir, exist_ok=True)
     
     target_tokens = 2350000000
-    sources = ["starcoder-python", "glaive-function-calling", "codeparrot-clean", "evol-codealpaca", "tiny-textbooks", "commitpackft-python", "code-contests"]
-    weights = [0.45, 0.15, 0.12, 0.10, 0.08, 0.05, 0.05]
+    sources = ["starcoder-python", "codeparrot-clean", "fineweb-edu", "tiny-textbooks", "evol-codealpaca", "glaive-function-calling", "commitpackft-python"]
+    weights = [0.53, 0.21, 0.10, 0.075, 0.05, 0.025, 0.01]
     
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
@@ -29,15 +29,17 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
         "starcoder-python": ("bigcode/starcoderdata", "python", "content"),
         "glaive-function-calling": ("glaiveai/glaive-function-calling-v2", None, "system_and_chat"),
         "codeparrot-clean": ("codeparrot/codeparrot-clean-train", None, "content"),
+        "fineweb-edu": ("HuggingFaceFW/fineweb-edu", "sample-10BT", "text"),
         "evol-codealpaca": ("theblackcat102/evol-codealpaca-v1", None, "instruction_output"),
         "tiny-textbooks": ("nampdn-ai/tiny-textbooks", None, "text"),
         "commitpackft-python": ("bigcode/commitpackft", "python", "diff"),
-        "code-contests": ("deepmind/code_contests", None, "problem_solution")
     }
     
     for src, max_chars in target_chars_per_src.items():
         print(f"    Fetching {src} (Target chars: {max_chars:,})...")
-        repo, subset, mode = hf_mapping.get(src, ("codeparrot/codeparrot-clean-train", None, "content"))
+        if src not in hf_mapping:
+            raise SystemExit(f"ERROR: source '{src}' has no hf_mapping entry. Refusing to fall back to another dataset (run #1 overfitting cause).")
+        repo, subset, mode = hf_mapping[src]
         
         try:
             if subset:

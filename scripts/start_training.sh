@@ -1,5 +1,6 @@
 #!/bin/bash
 # Master training launch script for CodeForge-250M
+export PATH="/system/conda/miniconda3/bin:$PATH"
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

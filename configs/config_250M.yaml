@@ -38,10 +38,9 @@ training:
   adam_beta2: 0.95
   adam_epsilon: 1.0e-8
   precision: "bf16"                # bf16 on A10G/A100, fp16 fallback on T4
-  deepspeed_config: "configs/ds_zero2.json"
 
 checkpointing:
-  save_steps: 100
+  save_steps: 1000                 # 44 checkpoints x 2.8GB = 123GB disk bloat at 100; 1000 restores the run-#1 fix
   save_time_interval_minutes: 20
   output_dir: "checkpoints/CodeForge-250M"
   hf_repo_id: "Yash1bajpai/CodeForge-250M"

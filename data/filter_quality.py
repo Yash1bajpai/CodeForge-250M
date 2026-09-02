@@ -57,11 +57,13 @@ def filter_code_quality(raw_dir: str = "data/raw", filtered_dir: str = "data/fil
                 
                 # Strict bracket/brace balance check only on pure code datasets
                 is_pure_code = any(k in lang for k in ["starcoder", "codeparrot", "python", "stack"])
-                if is_pure_code and not is_bracket_balanced(code):
+                # FIM-formatted sources are not parseable Python — bracket balance only
+                is_fim_source = any(k in lang for k in ["commitpackft", "fim"])
+                if is_pure_code and not is_fim_source and not is_bracket_balanced(code):
                     continue
                 
-                # Strict Python AST syntax verification on pure code files
-                if is_pure_code:
+                # Strict Python AST syntax verification on pure code files (never on FIM sources)
+                if is_pure_code and not is_fim_source:
                     if not is_valid_python_ast(code):
                         continue
                         

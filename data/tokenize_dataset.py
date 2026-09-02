@@ -31,9 +31,7 @@ def build_tokenized_dataset(dedup_dir: str = "data/dedup", tokenizer_dir: str = 
     eos_id = tokenizer.eos_token_id or 0
     files = glob.glob(os.path.join(dedup_dir, "*_dedup.jsonl"))
     if not files:
-        files = glob.glob(os.path.join(dedup_dir, "*.txt"))
-    if not files:
-        files = glob.glob(os.path.join("data/raw", "*.jsonl"))
+        raise SystemExit(f"ERROR: no dedup files in {dedup_dir}. Run filter_quality.py and deduplicate.py first. Refusing to fall back to raw unfiltered data (run #1 overfitting cause).")
         
     print(f"--> [Dataset Builder] Building {seq_len}-token sequence chunks from {len(files)} files...")
     all_tokens = []
@@ -70,7 +68,7 @@ def build_tokenized_dataset(dedup_dir: str = "data/dedup", tokenizer_dir: str = 
                         current_shard = []
                         
     if current_shard:
-        shard_idx = (chunk_count // shard_size) + 1
+        shard_idx = chunk_count // shard_size if chunk_count % shard_size == 0 else (chunk_count // shard_size) + 1
         out_path = os.path.join(output_dir, f"shard_{shard_idx:04d}.pt")
         torch.save(torch.tensor(current_shard, dtype=torch.long), out_path)
         
