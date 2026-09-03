@@ -79,22 +79,12 @@ if os.path.exists("/tmp/ckpt_in/metrics.json") and not os.path.exists(f"{CF}/met
 args = ["--resume"] if os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt") else ["--from_scratch"]
 print(f"=== [Kernel] training with args: {args} ===", flush=True)
 
-# GPU count: Kaggle T4 x2 exposes 2 CUDA devices -> torchrun DDP across both.
-n_gpus = 0
-try:
-    import torch
-    n_gpus = torch.cuda.device_count()
-except Exception:
-    pass
-if n_gpus >= 2:
-    print(f"=== [Kernel] launching DDP on {n_gpus} GPUs ===", flush=True)
-    train_proc = subprocess.run(["torchrun", f"--nproc_per_node={n_gpus}",
-                                 f"{CF}/training/train.py"] + args,
-                                cwd=CF, capture_output=False)
-else:
-    print("=== [Kernel] single-GPU mode ===", flush=True)
-    train_proc = subprocess.run([sys.executable, f"{CF}/training/train.py"] + args,
-                                cwd=CF, capture_output=False)
+# ALWAYS single-GPU: Kaggle's NvidiaTeslaT4 shape exposes 2 devices, but T4-x2 DDP
+# dies from NCCL rank desync at ~step 5 (rank0 SIGTERM / rank1 SIGABRT). Pin to GPU 0.
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+print("=== [Kernel] single-GPU mode (forced, GPU 0 of available) ===", flush=True)
+train_proc = subprocess.run([sys.executable, f"{CF}/training/train.py"] + args,
+                            cwd=CF, capture_output=False)
 
 # ---- always upload, even if training crashed: keep the evidence ----
 print("=== [Kernel] uploading checkpoint + metrics ===", flush=True)
