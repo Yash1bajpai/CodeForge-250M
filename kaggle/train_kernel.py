@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # Kaggle GPU kernel: trains CodeForge-250M run #2 with watchdog, uploads
 # checkpoint + metrics to a private Kaggle dataset after the session.
-import os, sys, subprocess, shutil, glob
+import os, sys, subprocess, shutil, glob, time
 
 CF = "/kaggle/working/CodeForge-250M"
 CKPT_DS = os.environ.get("KAGGLE_CHECKPOINT_DATASET", "yashbajpai2027/codeforge-ckpt")   # private dataset slug
@@ -46,32 +46,49 @@ if not glob.glob(f"{CF}/data/tokenized/shard_*.pt") or not os.path.exists(f"{CF}
     print(f"[Kernel] staged shards: {len(glob.glob(f'{CF}/data/tokenized/shard_*.pt'))} | "
           f"tokenizer: {os.path.exists(f'{CF}/data/tokenizer/tokenizer.json')}", flush=True)
 
-# 3) checkpoint (resume or fresh) — RETRY: dataset version may still be
-# processing right after a 3GB upload (caused silent 404 -> from-scratch retrain)
+# 3) checkpoint (resume or fresh) — QUOTA-CRITICAL: never silently retrain.
+# A session may start from scratch ONLY if the ckpt dataset verifiably holds
+# no checkpoint AND no recorded training progress. Any ambiguity = FATAL.
 ckpt_dir = f"{CF}/checkpoints/CodeForge-250M"
 os.makedirs(ckpt_dir, exist_ok=True)
-prior_progress = 0
+
+def pull_ckpt_dataset(dest):
+    r = subprocess.run(["kaggle", "datasets", "download", "-d", CKPT_DS,
+                        "-p", dest, "--unzip", "-o"],
+                       capture_output=True, text=True)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
 if not os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt"):
-    for attempt in range(5):
-        ok = kaggle_pull(CKPT_DS, "/tmp/ckpt_in")
-        if os.path.exists("/tmp/ckpt_in/latest_checkpoint.pt"):
-            shutil.copy("/tmp/ckpt_in/latest_checkpoint.pt", ckpt_dir)
+    pull_rc, pull_out = 1, ""
+    for attempt in range(8):
+        pull_rc, pull_out = pull_ckpt_dataset("/tmp/ckpt_in")
+        if pull_rc == 0:
             break
-        # does metrics say a checkpoint SHOULD exist?
+        print(f"[Kernel] ckpt dataset pull failed (attempt {attempt+1}/8, rc={pull_rc}); "
+              f"retry in 90s. tail: {pull_out[-200:]}", flush=True)
+        time.sleep(90)
+    if os.path.exists("/tmp/ckpt_in/latest_checkpoint.pt"):
+        shutil.copy("/tmp/ckpt_in/latest_checkpoint.pt", ckpt_dir)
+        print("[Kernel] checkpoint restored from dataset — resuming", flush=True)
+    elif pull_rc == 0:
+        # Full dataset in hand, no checkpoint file inside: fresh ONLY if no history.
+        prior = 0
         try:
             import json as _j
-            m = [ _j.loads(l) for l in open("/tmp/ckpt_in/metrics.json") if l.strip() ] \
-                if os.path.exists("/tmp/ckpt_in/metrics.json") else []
-            trains = [e for e in m if e.get("event") == "TRAIN"]
-            prior_progress = trains[-1]["step"] if trains else 0
-        except Exception:
-            prior_progress = 0
-        if prior_progress == 0:
-            break  # genuinely fresh run, no checkpoint expected
-        print(f"[Kernel] ckpt pull attempt {attempt+1} failed (progress=step {prior_progress}); waiting 90s...", flush=True)
-        import time as _t; _t.sleep(90)
-    if prior_progress > 0 and not os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt"):
-        raise SystemExit(f"FATAL: training previously reached step {prior_progress} but checkpoint is unavailable after 5 pulls. Refusing to retrain from scratch (quota protection).")
+            m = [_j.loads(l) for l in open("/tmp/ckpt_in/metrics.json") if l.strip()]
+            prior = max((e.get("step", 0) for e in m if e.get("event") == "TRAIN"), default=0)
+        except FileNotFoundError:
+            prior = 0
+        if prior > 0:
+            raise SystemExit(
+                f"FATAL: metrics show step {prior} but dataset has no latest_checkpoint.pt "
+                f"(bad upload). Refusing to retrain from scratch.")
+        print("[Kernel] no checkpoint and no training history — fresh run", flush=True)
+    else:
+        raise SystemExit(
+            f"FATAL: cannot pull ckpt dataset after 8 attempts (rc={pull_rc}). "
+            f"Refusing to retrain from scratch. tail: {pull_out[-200:]}")
+
 if os.path.exists("/tmp/ckpt_in/metrics.json") and not os.path.exists(f"{CF}/metrics.json"):
     shutil.copy("/tmp/ckpt_in/metrics.json", CF)
 
@@ -82,8 +99,16 @@ print(f"=== [Kernel] training with args: {args} ===", flush=True)
 # ALWAYS single-GPU: Kaggle's NvidiaTeslaT4 shape exposes 2 devices, but T4-x2 DDP
 # dies from NCCL rank desync at ~step 5 (rank0 SIGTERM / rank1 SIGABRT). Pin to GPU 0.
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+try:
+    gpu_info = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
+                               "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+except Exception:
+    gpu_info = "unknown"
+print(f"=== [Kernel] GPU: {gpu_info} ===", flush=True)
 print("=== [Kernel] single-GPU mode (forced, GPU 0 of available) ===", flush=True)
-train_proc = subprocess.run([sys.executable, f"{CF}/training/train.py"] + args,
+# Kaggle hard-kills GPU sessions at 9h; stop at 8.5h so save+upload always run.
+train_proc = subprocess.run([sys.executable, f"{CF}/training/train.py"] + args +
+                            ["--max_hours", "8.5"],
                             cwd=CF, capture_output=False)
 
 # ---- always upload, even if training crashed: keep the evidence ----

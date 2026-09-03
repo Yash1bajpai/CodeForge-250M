@@ -179,6 +179,7 @@ def train():
     min_lr = float(train_cfg.get("min_learning_rate", 6.0e-5))
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
     save_steps = int(full_cfg.get("checkpointing", {}).get("save_steps", 1000))
+    save_interval_sec = int(full_cfg.get("checkpointing", {}).get("save_time_interval_minutes", 20)) * 60
     val_steps = int(train_cfg.get("val_steps", 100))          # B7: val eval cadence
     val_batches_n = int(train_cfg.get("val_batches", 4))
     seq_len = cfg["max_position_embeddings"]
@@ -274,6 +275,7 @@ def train():
     # WATCHDOG STATE
     val_history = []
     loss_floor_strikes = 0
+    last_save_time = time.time()
 
     def watchdog_write(reason, extra=None):
         entry = {"event": "STOP", "reason": reason, "step": step, "ts": time.time()}
@@ -407,10 +409,12 @@ def train():
             if val_diverged:
                 break
 
-            if step % save_steps == 0 or step == max_steps:
+            if (step % save_steps == 0 or step == max_steps
+                    or (time.time() - last_save_time) >= save_interval_sec):
                 if is_main:
                     step_path = save_checkpoint(raw_model, optimizer, step, loss_val, val_loss,
                                                 ckpt_dir, latest_path)
+                    last_save_time = time.time()
                     print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
                     append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
 

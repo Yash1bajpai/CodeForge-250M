@@ -12,6 +12,7 @@
 KERNEL="yashbajpai2027/codeforge-250m-train-run-2"
 CKPT_DS="yashbajpai2027/codeforge-ckpt"
 PUSH_DIR="/tmp/opencode/train_push"
+REPO="/data/data/com.termux/files/home/projects/own_llm/CodeForge-250M_win"
 LOG="/tmp/opencode/overnight.log"
 ALERT="/tmp/opencode/ALERT.txt"
 POLL_MIN=10
@@ -92,6 +93,10 @@ EOF
         alert "Crash loop: $MAX_RESTARTS fast failures in a row. Last: $DEC"
       fi
       log "re-pushing kernel (resume) — budget $restarts/$MAX_RESTARTS"
+      # sync kernel code from repo so a stale push dir can never resurrect old bugs
+      if ! cp -f "$REPO/kaggle/train_kernel.py" "$REPO/kaggle/kernel-metadata.json" "$PUSH_DIR/" 2>> "$LOG"; then
+        alert "cannot sync kernel files from $REPO — refusing to push stale code"
+      fi
       (cd "$PUSH_DIR" && kaggle kernels push -p . >> "$LOG" 2>&1)
       last_push_ts=$(date +%s)
       ;;
