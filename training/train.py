@@ -5,6 +5,7 @@ import math
 import glob
 import json
 import random
+import traceback
 import yaml
 import argparse
 import torch
@@ -146,6 +147,7 @@ def train():
     log_path = os.path.join(PROJECT_ROOT, "training.log")
     if is_main:
         sys.stdout = Logger(log_path)
+        sys.stderr = Logger(log_path)   # tracebacks must reach training.log too
 
     mode = f"DDP x{ddp_world}" if is_ddp else "SINGLE"
     print(f"=== [CODEFORGE-250M RUN #2 — FRESH, SINGLE-PASS, WATCHED — {mode}] ===")
@@ -221,12 +223,15 @@ def train():
     if args.resume:
         if not os.path.exists(latest_path):
             raise SystemExit("ERROR: --resume passed but no latest_checkpoint.pt found.")
-        ckpt = torch.load(latest_path, map_location=device)
+        ckpt = torch.load(latest_path, map_location="cpu")  # cpu: avoid GPU memory spike during restore
         raw_model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         start_step = ckpt.get('step', 0)
         loss_val = ckpt.get('loss', 0.0)
         val_loss = ckpt.get('val_loss', None)
+        del ckpt
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print(f"--> [Resume] Explicitly resumed from step {start_step} (loss {loss_val:.4f})")
     elif os.path.exists(latest_path) and not args.from_scratch:
         raise SystemExit("ERROR: latest_checkpoint.pt exists. Pass --resume to continue it, "
@@ -250,7 +255,27 @@ def train():
                                 sampler=train_sampler, num_workers=2, pin_memory=True, drop_last=True)
     else:
         train_sampler = None
-        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device, shuffle=True,
+        # Deterministic global permutation (fixed seed): every session sees the
+        # SAME order. On resume we start the sampler at the exact sample offset,
+        # so the single pass continues where it stopped — no re-shuffle, no data
+        # cycling (run-#1 killer #2).
+        _perm_gen = torch.Generator().manual_seed(42)
+        _perm = torch.randperm(len(train_dataset), generator=_perm_gen).tolist()
+
+        class _OrderedIndices(torch.utils.data.Sampler):
+            def __init__(self, indices):
+                self.indices = indices
+            def __iter__(self):
+                return iter(self.indices)
+            def __len__(self):
+                return len(self.indices)
+
+        skip_samples = min(start_step * accum_steps * batch_size_per_device, len(_perm))
+        if skip_samples:
+            print(f"--> [Resume] data position: {skip_samples:,}/{len(_perm):,} samples already "
+                  f"consumed — continuing single pass from there", flush=True)
+        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
+                                sampler=_OrderedIndices(_perm[skip_samples:]),
                                 num_workers=2, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
                             num_workers=1, pin_memory=True, drop_last=True)
@@ -290,7 +315,9 @@ def train():
 
     step = start_step
     epoch_done = False
+    crashed = False
     try:
+      try:
         for step_offset in range(1, steps_planned + 1):
             step = start_step + step_offset
 
@@ -435,11 +462,21 @@ def train():
                 if is_main:
                     watchdog_write("STOP_AND_SAVE_SIGNAL")
                 break
+      except Exception:
+        # Never lose the diagnosis again: crash tracebacks go to metrics.json,
+        # training.log AND the kernel log. FINAL below is marked unclean.
+        crashed = True
+        tb = traceback.format_exc()
+        append_metric(metrics_path, {"event": "CRASH", "step": step,
+                                     "error": tb[-1500:], "ts": time.time()})
+        print(f"--> [CRASH] exception at step {step}:\n{tb}", flush=True)
+        raise
     finally:
         if batch_generator is not None and step > start_step and is_main:
             save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path)
-            print(f"--> [Final] checkpoint saved at step {step}", flush=True)
-            append_metric(metrics_path, {"event": "FINAL", "step": step, "ts": time.time()})
+            print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)
+            append_metric(metrics_path, {"event": "FINAL", "step": step,
+                                         "clean": not crashed, "ts": time.time()})
         if is_ddp:
             import torch.distributed as dist
             dist.barrier()

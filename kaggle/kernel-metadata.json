@@ -8,7 +8,7 @@
   "enable_gpu": true,
   "enable_internet": true,
   "machine_shape": "NvidiaTeslaP100",
-  "dataset_sources": [],
+  "dataset_sources": ["yashbajpai2027/codeforge-data", "yashbajpai2027/codeforge-ckpt"],
   "competition_sources": [],
   "kernel_sources": []
 }
