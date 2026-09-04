@@ -154,10 +154,11 @@ class CodeForgeModel(nn.Module):
         
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :]
-            shift_labels = labels[..., 1:]
-            loss = F.cross_entropy(shift_logits.reshape(-1, self.vocab_size), shift_labels.reshape(-1))
-            
+            # x = input_ids[:-1] and y = labels[1:] are ALREADY the shifted pair
+            # (LazyShardDataset.__getitem__). Shifting again trains t+2 instead
+            # of t+1 — the run-#2 double-shift bug. Loss pairs logits[i] with labels[i].
+            loss = F.cross_entropy(logits.reshape(-1, self.vocab_size), labels.reshape(-1))
+
         return logits, loss
 
     def get_parameter_count(self) -> int:

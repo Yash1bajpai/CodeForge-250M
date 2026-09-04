@@ -58,7 +58,9 @@ except FileNotFoundError:
     print("ACTION=ALERT reason=no-metrics-uploaded (crashed before upload?) state=" + state); sys.exit()
 trains = [e for e in entries if e.get("event") == "TRAIN"]
 stops  = [e for e in entries if e.get("event") == "STOP"]
-step = trains[-1]["step"] if trains else 0
+# step = highest recorded anywhere (TRAIN logs every 5 steps — FINAL/CKPT/EXIT
+# carry the true latest; reading only TRAIN misses the completion at 2898)
+step = max((e.get("step", 0) for e in entries if "step" in e), default=0)
 if step >= max_steps:
     print(f"ACTION=DONE step={step} — training complete!"); sys.exit()
 if state == "KernelWorkerStatus.ERROR":
@@ -94,6 +96,7 @@ EOF
       fi
       log "re-pushing kernel (resume) — budget $restarts/$MAX_RESTARTS"
       # sync kernel code from repo so a stale push dir can never resurrect old bugs
+      mkdir -p "$PUSH_DIR"
       if ! cp -f "$REPO/kaggle/train_kernel.py" "$REPO/kaggle/kernel-metadata.json" "$PUSH_DIR/" 2>> "$LOG"; then
         alert "cannot sync kernel files from $REPO — refusing to push stale code"
       fi

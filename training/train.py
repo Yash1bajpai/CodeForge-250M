@@ -51,20 +51,30 @@ class LazyShardDataset(Dataset):
             glob.glob(os.path.join(tokenized_dir, "shard_*.pt")))
         if not self.shard_files:
             raise SystemExit("ERROR: no shards in data/tokenized. Run the data pipeline first.")
-        # probe one shard for shape
         probe = torch.load(self.shard_files[0], map_location="cpu")
         self.shard_num_seqs = probe.shape[0] if isinstance(probe, torch.Tensor) else len(probe)
         print(f"--> [DataLoader] {len(self.shard_files)} shards x ~{self.shard_num_seqs} seqs "
               f"(~{len(self.shard_files) * self.shard_num_seqs * seq_length:,} tokens total)")
+        # Preload all shards into one shared-memory uint16 tensor (3.05 GB):
+        # per-sample torch.load of a 4MB shard was O(shard) per sequence and
+        # starved the GPU. share_memory_() lets DataLoader workers map it zero-copy.
+        total = len(self.shard_files) * self.shard_num_seqs
+        self.data = torch.empty(total, seq_length, dtype=torch.uint16).share_memory_()
+        from concurrent.futures import ThreadPoolExecutor
+        def _load_one(i_path):
+            i, path = i_path
+            t = torch.load(path, map_location="cpu")
+            return i, t
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for i, t in ex.map(_load_one, enumerate(self.shard_files)):
+                n = t.shape[0]
+                self.data[i * self.shard_num_seqs:(i * self.shard_num_seqs) + n] = t[:n]
+        print(f"--> [DataLoader] preloaded {total:,} seqs into shared memory "
+              f"({self.data.numel() * 2 / 1e9:.2f} GB)", flush=True)
     def __len__(self):
         return len(self.shard_files) * self.shard_num_seqs
     def __getitem__(self, idx):
-        shard_idx = idx // self.shard_num_seqs
-        local_idx = idx % self.shard_num_seqs
-        shard = torch.load(self.shard_files[shard_idx], map_location="cpu")
-        seq = shard[local_idx]
-        if seq.dtype != torch.long:
-            seq = seq.long()  # uint16 on disk -> long for embedding lookup
+        seq = self.data[idx].long()  # uint16 -> long for embedding lookup
         x = seq[:-1]
         y = seq[1:]
         return x, y

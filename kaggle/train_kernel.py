@@ -70,16 +70,20 @@ ckpt_dir = f"{CF}/checkpoints/CodeForge-250M"
 os.makedirs(ckpt_dir, exist_ok=True)
 metrics_path = f"{CF}/metrics.json"
 
-if os.path.exists(f"{CKPT_MOUNT}/latest_checkpoint.pt"):
-    shutil.copy(f"{CKPT_MOUNT}/latest_checkpoint.pt", f"{ckpt_dir}/latest_checkpoint.pt")
-    print("[Kernel] checkpoint restored from kernel-attached mount", flush=True)
+def max_step_in(text):
+    try:
+        entries = [json.loads(l) for l in text.splitlines() if l.strip()]
+        return max((e.get("step", 0) for e in entries
+                    if e.get("event") in ("TRAIN", "FINAL", "CKPT", "CRASH", "TRAIN_EXIT")), default=0)
+    except Exception:
+        return 0
 
 # metrics: prefer the freshest of (mount, API). The mount can lag one version
-# if the newest upload is still processing server-side.
+# if the newest upload is still processing server-side. Freshest = highest
+# recorded step (length is NOT freshness — verbose crash tracebacks pollute it).
 metrics_candidates = []
-for mpath in [f"{CKPT_MOUNT}/metrics.json"]:
-    if os.path.exists(mpath):
-        metrics_candidates.append(open(mpath).read())
+if os.path.exists(f"{CKPT_MOUNT}/metrics.json"):
+    metrics_candidates.append(open(f"{CKPT_MOUNT}/metrics.json").read())
 try:
     r = sh(["kaggle", "datasets", "download", "-d", CKPT_DS, "-f", "metrics.json",
             "-p", "/tmp/mapi", "--unzip", "-o"], capture_output=True, text=True, timeout=180)
@@ -88,42 +92,62 @@ try:
 except Exception as e:
     print(f"[Kernel] metrics API pull skipped: {e}", flush=True)
 if metrics_candidates and not os.path.exists(metrics_path):
-    best = max(metrics_candidates, key=len)  # most complete history wins
+    best = max(metrics_candidates, key=max_step_in)
     open(metrics_path, "w").write(best)
-
-def max_step_in(text):
-    try:
-        entries = [json.loads(l) for l in text.splitlines() if l.strip()]
-        return max((e.get("step", 0) for e in entries
-                    if e.get("event") in ("TRAIN", "FINAL", "CKPT", "CRASH")), default=0)
-    except Exception:
-        return 0
 
 prior_step = 0
 if os.path.exists(metrics_path):
     prior_step = max_step_in(open(metrics_path).read())
 print(f"[Kernel] prior recorded progress: step {prior_step}", flush=True)
 
-# resume vs fresh — QUOTA-CRITICAL: never silently retrain from scratch
-if not os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt"):
-    if prior_step == 0:
-        print("[Kernel] no checkpoint and no history — fresh run", flush=True)
+# resume vs fresh — QUOTA-CRITICAL: never silently retrain from scratch or
+# REWIND progress. A mounted/downloaded checkpoint is only used if its step
+# is >= the highest step recorded in metrics (mounts can lag one version).
+def ckpt_step(path):
+    try:
+        import torch
+        c = torch.load(path, map_location="cpu")
+        s = c.get("step", 0)
+        del c
+        return s
+    except Exception as e:
+        print(f"[Kernel] ckpt step read failed ({e}); assuming 0", flush=True)
+        return 0
+
+restored = False
+if os.path.exists(f"{CKPT_MOUNT}/latest_checkpoint.pt"):
+    mount_step = ckpt_step(f"{CKPT_MOUNT}/latest_checkpoint.pt")
+    print(f"[Kernel] mounted checkpoint step: {mount_step} (prior recorded: {prior_step})", flush=True)
+    if mount_step >= prior_step:
+        shutil.copy(f"{CKPT_MOUNT}/latest_checkpoint.pt", f"{ckpt_dir}/latest_checkpoint.pt")
+        restored = True
+        print("[Kernel] checkpoint restored from kernel mount (verified fresh)", flush=True)
     else:
-        ok = False
-        for att in range(4):
-            r = sh(["kaggle", "datasets", "download", "-d", CKPT_DS,
-                    "-p", "/tmp/ckpt_api", "--unzip", "-o"],
-                   capture_output=True, text=True, timeout=600)
-            if os.path.exists("/tmp/ckpt_api/latest_checkpoint.pt"):
-                shutil.move("/tmp/ckpt_api/latest_checkpoint.pt", f"{ckpt_dir}/latest_checkpoint.pt")
+        print("[Kernel] WARNING: mounted checkpoint is STALE — ignoring, trying API", flush=True)
+
+if not restored and prior_step > 0:
+    ok = False
+    for att in range(5):
+        r = sh(["kaggle", "datasets", "download", "-d", CKPT_DS,
+                "-p", "/tmp/ckpt_api", "--unzip", "-o"],
+               capture_output=True, text=True, timeout=600)
+        candidate = "/tmp/ckpt_api/latest_checkpoint.pt"
+        if os.path.exists(candidate):
+            dl_step = ckpt_step(candidate)
+            if dl_step >= prior_step:
+                shutil.move(candidate, f"{ckpt_dir}/latest_checkpoint.pt")
                 ok = True
+                print(f"[Kernel] fresh checkpoint restored via API (step {dl_step})", flush=True)
+                done_step = dl_step
                 break
-            print(f"[Kernel] ckpt API pull attempt {att+1}/4 failed; retry in 120s", flush=True)
-            time.sleep(120)
-        if not ok:
-            raise SystemExit(
-                f"FATAL: prior training reached step {prior_step} but checkpoint "
-                f"is unavailable. Refusing to retrain from scratch (quota protection).")
+            print(f"[Kernel] API version still processing (step {dl_step} < {prior_step})", flush=True)
+        else:
+            print(f"[Kernel] ckpt API pull attempt {att+1}/5 failed", flush=True)
+        time.sleep(60)
+    if not ok:
+        raise SystemExit(
+            "FATAL: recorded progress exists but no fresh checkpoint available. "
+            "Refusing to run (quota + rewind protection).")
 
 args = ["--resume"] if os.path.exists(f"{ckpt_dir}/latest_checkpoint.pt") else ["--from_scratch"]
 
