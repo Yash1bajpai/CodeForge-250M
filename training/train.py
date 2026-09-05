@@ -60,7 +60,13 @@ class LazyShardDataset(Dataset):
         # per-sample torch.load of a 4MB shard was O(shard) per sequence and
         # starved the GPU. share_memory_() lets DataLoader workers map it zero-copy.
         total = len(self.shard_files) * self.shard_num_seqs
-        self.data = torch.empty(total, seq_length, dtype=torch.uint16).share_memory_()
+        try:
+            self.data = torch.empty(total, seq_length, dtype=torch.uint16).share_memory_()
+        except Exception as e:
+            # Kaggle /dev/shm is ~64MB — a multi-GB shared tensor cannot fit there.
+            # Plain RAM is fine: forked DataLoader workers COW-share read-only pages.
+            print(f"--> [DataLoader] share_memory_ unavailable ({e}); falling back to plain RAM tensor", flush=True)
+            self.data = torch.empty(total, seq_length, dtype=torch.uint16)
         from concurrent.futures import ThreadPoolExecutor
         def _load_one(i_path):
             i, path = i_path
