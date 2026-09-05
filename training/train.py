@@ -6,6 +6,7 @@ import glob
 import json
 import random
 import traceback
+import threading
 import yaml
 import argparse
 import torch
@@ -104,11 +105,14 @@ def evaluate_val_loss(model, val_batches, device, dtype):
     model.train()
     return sum(losses) / max(1, len(losses))
 
+_METRICS_LOCK = threading.Lock()  # telemetry thread reads metrics.json concurrently
+
 def append_metric(metrics_path, entry):
     """Watchdog food: append one JSON line to metrics.json (pulled by watch_shift.sh)."""
     os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-    with open(metrics_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    with _METRICS_LOCK:
+        with open(metrics_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
 def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2):
     state = {
@@ -179,6 +183,54 @@ def train():
     ckpt_dir = os.path.join(PROJECT_ROOT, full_cfg.get("checkpointing", {}).get("output_dir", "checkpoints/CodeForge-250M"))
     os.makedirs(ckpt_dir, exist_ok=True)
     latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
+
+    # LIVE TELEMETRY: push metrics + log tail to a tiny Kaggle dataset every
+    # 15 min so the outside-world supervisor (agy) can watch the run while the
+    # session is still going. Failures must NEVER touch training.
+    # (_METRICS_LOCK is module-level; telemetry thread reads metrics.json.)
+    _TELEMETRY_STOP = threading.Event()
+
+    def _telemetry_uploader():
+        import subprocess as _sp, shutil as _sh
+        tdir = "/tmp/telemetry_push"
+        while not _TELEMETRY_STOP.wait(900):
+            try:
+                os.makedirs(tdir, exist_ok=True)
+                with open(f"{tdir}/dataset-metadata.json", "w") as f:
+                    json.dump({"title": "codeforge-telemetry",
+                               "id": "yashbajpai2027/codeforge-telemetry",
+                               "isPrivate": True,
+                               "licenses": [{"name": "CC0-1.0"}]}, f)
+                if os.path.exists(metrics_path):
+                    with _METRICS_LOCK:
+                        _sh.copy(metrics_path, tdir)
+                lp = os.path.join(PROJECT_ROOT, "training.log")
+                if os.path.exists(lp):
+                    with open(lp, "r", errors="replace") as f:
+                        tail = f.readlines()[-400:]
+                    with open(f"{tdir}/training_tail.log", "w") as f:
+                        f.writelines(tail)
+                step_now = 0
+                try:
+                    with _METRICS_LOCK:
+                        with open(metrics_path) as f:
+                            step_now = max((json.loads(l).get("step", 0)
+                                            for l in f if l.strip()), default=0)
+                except Exception:
+                    pass
+                with open(f"{tdir}/step.json", "w") as f:
+                    json.dump({"step": step_now, "ts": time.time()}, f)
+                r = _sp.run(["kaggle", "datasets", "version", "-p", tdir,
+                             "-m", "live", "--dir-mode", "zip"],
+                            capture_output=True, text=True, timeout=180)
+                print(f"[Telemetry] push rc={r.returncode} step={step_now}", flush=True)
+            except Exception as e:
+                print(f"[Telemetry] push failed (ignored): {e}", flush=True)
+
+    _telemetry_thread = None
+    if is_main:
+        _telemetry_thread = threading.Thread(target=_telemetry_uploader, daemon=True)
+        _telemetry_thread.start()
 
     batch_size_per_device = train_cfg.get("batch_size_per_device", 16)
     accum_steps = train_cfg.get("gradient_accumulation_steps", 16)
@@ -482,6 +534,9 @@ def train():
         print(f"--> [CRASH] exception at step {step}:\n{tb}", flush=True)
         raise
     finally:
+        _TELEMETRY_STOP.set()  # stop the live telemetry daemon before exit
+        if _telemetry_thread is not None and _telemetry_thread.is_alive():
+            _telemetry_thread.join(timeout=30)
         if batch_generator is not None and step > start_step and is_main:
             save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path)
             print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)

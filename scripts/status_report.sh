@@ -48,6 +48,16 @@ if vals:
 if ckpts:
     print(f"LAST CKPT    : step {ckpts[-1]['step']}")
 
+# agy watchman verdicts (from scripts/agy_supervisor.sh)
+import os as _os
+wl = "/tmp/opencode/AGY_WATCH.log"
+if _os.path.exists(wl):
+    lines = [l.rstrip() for l in open(wl) if ("live" in l or "VERDICT" in l.upper())][-4:]
+    if lines:
+        print("AGY WATCHMAN :")
+        for l in lines:
+            print("  " + l)
+
 # --- verdict ---
 print("-" * 62)
 verdicts = []
