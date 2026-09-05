@@ -10,10 +10,10 @@ CF = "/kaggle/working/CodeForge-250M"
 CKPT_DS = "yashbajpai2027/codeforge-ckpt"
 DATA_MOUNT = "/kaggle/input/codeforge-data"
 CKPT_MOUNT = "/kaggle/input/codeforge-ckpt"
-# One-shot: ignore any prior checkpoint/metrics and restart run #2 at step 0
-# (prior steps trained under the v26 t+2 double-shift bug). Flip to False once
-# the fresh session is confirmed training so supervisor re-pushes auto-resume.
-FRESH_START = True
+# One-shot fresh start was used to launch run #2 clean (prior steps trained
+# under the v26 t+2 double-shift bug). Confirmed training 2026-09-05; now off
+# so supervisor re-pushes restore the latest checkpoint and auto-resume.
+FRESH_START = False
 
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
