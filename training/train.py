@@ -234,7 +234,7 @@ def train():
                 print(f"[Telemetry] push failed (ignored): {e}", flush=True)
 
     _telemetry_thread = None
-    if is_main:
+    if is_main and not os.environ.get("CF_TELEMETRY_DISABLED"):
         _telemetry_thread = threading.Thread(target=_telemetry_uploader, daemon=True)
         _telemetry_thread.start()
 
