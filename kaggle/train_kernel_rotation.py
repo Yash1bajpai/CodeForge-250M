@@ -56,14 +56,17 @@ def hf_upload(path, path_in_repo, msg):
     ours (another account ran further), refuse to overwrite — last-writer-wins
     would silently roll the run back."""
     from huggingface_hub import HfApi
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
     try:
         api = HfApi(token=HF_TOKEN)
         if path_in_repo == "latest_checkpoint.pt":
+            _tmpd = None
             try:
                 import torch as _t
                 import tempfile as _tf
+                _tmpd = _tf.mkdtemp(prefix="rewind_")
                 remote = api.hf_hub_download(repo_id=HF_REPO, filename="latest_checkpoint.pt",
-                                             token=HF_TOKEN, cache_dir=_tf.mkdtemp())
+                                             token=HF_TOKEN, cache_dir=_tmpd)
                 ours = _t.load(path, map_location="cpu")
                 try:
                     theirs = _t.load(remote, map_location="cpu")
@@ -74,8 +77,13 @@ def hf_upload(path, path_in_repo, msg):
                           f"{ours.get('step')} — NOT overwriting", flush=True)
                     return True  # not an error; the newer state is already there
                 del ours, theirs
-            except FileNotFoundError:
+            except (EntryNotFoundError, RepositoryNotFoundError, FileNotFoundError):
                 pass  # first push, nothing to guard
+            finally:
+                # clean the multi-GB guard download immediately
+                import shutil as _sh
+                if _tmpd:
+                    _sh.rmtree(_tmpd, ignore_errors=True)
         api.upload_file(path_or_fileobj=path, path_in_repo=path_in_repo,
                         repo_id=HF_REPO, repo_type="model", commit_message=msg)
         return True
@@ -116,16 +124,39 @@ if staged == 0:
     # friend account: data comes from the HF rotation repo (data/ prefix)
     print("[Kernel] no Kaggle data mount — pulling shards from HF rotation repo", flush=True)
     from huggingface_hub import list_repo_files, hf_hub_download
+    EXPECTED_SHARDS = None  # read manifest if present
     files = [f for f in list_repo_files(repo_id=HF_REPO, token=HF_TOKEN)
              if f.startswith("data/tokenized/") and f.endswith(".pt")]
-    print(f"[Kernel] {len(files)} shards in rotation repo", flush=True)
+    # shard-count contract: a short staging silently changes the seed-42
+    # permutation and the val split, breaking single-pass resume. Fail hard.
+    try:
+        mani = hf_hub_download(repo_id=HF_REPO, filename="data/manifest.json",
+                               token=HF_TOKEN)
+        EXPECTED_SHARDS = json.load(open(mani)).get("n_shards")
+    except Exception:
+        pass
+    if EXPECTED_SHARDS is not None and len(files) != EXPECTED_SHARDS:
+        raise SystemExit(f"FATAL: rotation repo has {len(files)} shards, manifest says "
+                         f"{EXPECTED_SHARDS}. Partial staging would corrupt the "
+                         f"permutation/val-split. Do not train.")
+    print(f"[Kernel] {len(files)} shards in rotation repo "
+          f"(manifest: {EXPECTED_SHARDS})", flush=True)
     if not files:
         raise SystemExit("FATAL: no shards on Kaggle mount or HF rotation repo")
     os.makedirs(f"{CF}/data/tokenized", exist_ok=True)
     for i, f in enumerate(files):
         # local_dir preserves the repo path: tokenized_hf/data/tokenized/shard_X.pt
-        p = hf_hub_download(repo_id=HF_REPO, filename=f, token=HF_TOKEN,
-                            local_dir=f"{CF}/data/tokenized_hf")
+        p = None
+        for att in range(4):
+            try:
+                p = hf_hub_download(repo_id=HF_REPO, filename=f, token=HF_TOKEN,
+                                    local_dir=f"{CF}/data/tokenized_hf")
+                break
+            except Exception as e:
+                print(f"[Kernel] shard pull {f} attempt {att+1}/4 failed: {e}", flush=True)
+                time.sleep(20)
+        if p is None:
+            raise SystemExit(f"FATAL: shard {f} would not download after 4 attempts")
         dst = f"{CF}/data/tokenized/{os.path.basename(f)}"
         if not os.path.exists(dst):
             try:
@@ -134,18 +165,17 @@ if staged == 0:
                 shutil.copy(p, dst)
         if (i + 1) % 100 == 0:
             print(f"[Kernel] staged {i+1}/{len(files)} shards", flush=True)
-    tok = hf_hub_download(repo_id=HF_REPO, filename="data/tokenizer/tokenizer.json",
-                          token=HF_TOKEN, local_dir=f"{CF}/data/tokenizer_hf")
-    tok_dir = os.path.dirname(tok)  # .../tokenizer_hf/data/tokenizer
-    for f in glob.glob(os.path.join(tok_dir, "*")):
-        dst = f"{CF}/data/tokenizer/{os.path.basename(f)}"
+    # tokenizer: pull every file under data/tokenizer/ (json + config siblings)
+    tok_files = [f for f in list_repo_files(repo_id=HF_REPO, token=HF_TOKEN)
+                 if f.startswith("data/tokenizer/") and not f.endswith("/") and len(f) > len("data/tokenizer/")]
+    os.makedirs(f"{CF}/data/tokenizer", exist_ok=True)
+    for tf in tok_files:
+        p = hf_hub_download(repo_id=HF_REPO, filename=tf, token=HF_TOKEN,
+                            local_dir=f"{CF}/data/tokenizer_hf")
+        dst = f"{CF}/data/tokenizer/{os.path.basename(tf)}"
         if not os.path.exists(dst):
-            shutil.copy(f, dst)
-    # tokenizer.json has siblings (special_tokens_map etc.) one level up
-    for f in glob.glob(os.path.join(os.path.dirname(tok_dir), "*.json")):
-        dst = f"{CF}/data/tokenizer/{os.path.basename(f)}"
-        if not os.path.exists(dst):
-            shutil.copy(f, dst)
+            shutil.copy(p, dst)
+    print(f"[Kernel] tokenizer staged: {len(tok_files)} files", flush=True)
 
 # 3) checkpoint: ALWAYS from HF (the single source of truth across accounts)
 ckpt_dir = f"{CF}/checkpoints/CodeForge-250M"
