@@ -9,6 +9,52 @@
 
 ---
 
+## 📚 Training Data Curriculum (Run #2 → 10B Scale-Up)
+
+### Stage A — 1.52B unique tokens (current run, single pass, zero repetition)
+
+Weighted multi-source corpus, all sources open/ungated on HuggingFace. Weights sum to exactly 1.0.
+
+| Source | Weight | ~Tokens | Role |
+|---|---|---|---|
+| `bigcode/starcoderdata` (python) | 0.56 | ~850M | Foundational Python fluency, real-world code |
+| `codeparrot/codeparrot-clean` | 0.22 | ~334M | Secondary Python corpus |
+| `HuggingFaceFW/fineweb-edu` | 0.135 | ~205M | English reasoning for the ReAct thought loop |
+| `theblackcat102/evol-codealpaca-v1` | 0.053 | ~80M | Instruction→response format following |
+| `glaiveai/glaive-function-calling-v2` | 0.025 | ~38M | Structured tool-call / JSON syntax |
+| `bigcode/commitpackft` (python) | 0.007 | ~11M | Bug→fix pairs (FIM format) |
+
+**Pipeline:** weighted streaming download → quality filter (length/alphanumeric/bracket-balance + Python AST, FIM sources exempt) → MinHash+LSH near-dedup (5-gram bands, cross-source) → custom 32k BPE tokenizer (11 special tokens incl. FIM + ReAct tool tokens) → **50% FIM transformation** (StarCoder/DeepSeek-Coder standard) → 2,048-token uint16 shards. 0.5% held out for validation. Target: 2,898 steps × 524,288 tokens/step = exactly one pass.
+
+### Stage B — +8.48B new tokens (10B total, two-phase design)
+
+**B1 "Pretrain" (7.48B):** 80% raw code / 12% technical docs / 8% synthetic textbooks, uniform 50% FIM, zero chat templates.
+
+| Source | Net tokens |
+|---|---|
+| `starcoderdata` (python, continued stream) | +4.44B |
+| `bigcode/the-stack-dedup` v1 (python, ungated) | +1.20B |
+| `cosmopedia-v2` / `smollm-corpus` (python subset) | +0.50B |
+| `fineweb-edu` (beyond 10BT sample) | +0.665B |
+| StackOverflow Q&A (technical discourse) | +0.40B |
+| Cleaned Jupyter notebooks (NL↔code bridge) | +0.28B |
+
+**B2 "Anneal" (1.0B, LR decayed to zero):** 40% synthetic textbooks, 30% instruction data, 30% agentic tool-calling — concentrated at the end, not diluted through pretraining.
+
+| Source | Net tokens |
+|---|---|
+| `nvidia/OpenCodeInstruct` | +0.40B |
+| cosmopedia-v2 (continued) | +0.15B |
+| `Magicoder` OSS-Instruct + Evol (185K) | +0.15B |
+| `NousResearch/hermes-function-calling-v1` + `Salesforce/xlam-function-calling-60k` | +0.20B |
+| `CodeFeedback-Filtered-Instruction` | +0.10B |
+
+**Deliberately excluded:** The Stack v2 (gated), tiny-textbooks (gated), any HumanEval/MBPP-shaped data (benchmark contamination). Codeparrot frozen at its Stage-A 0.22B (noisy pre-2021 corpus — low value at 250M scale). Decontamination: 16-token normalized-window matching against HumanEval/MBPP *test assertions* (not 8-gram, which false-positives on standard Python idioms).
+
+**Tokenizer stays frozen across stages** — Stage B shards append to the same 32k vocabulary, so checkpoints remain compatible across the entire 10B run (~19,070 steps total, ~400 GPU-hours on Kaggle T4s via multi-account quota rotation with HuggingFace Hub as the checkpoint channel).
+
+---
+
 ## 🌟 Key Engineering Highlights & Architecture
 
 ### 1. PyTorch 2.0+ SDPA (FlashAttention-2) & Memory-Efficient Attention
