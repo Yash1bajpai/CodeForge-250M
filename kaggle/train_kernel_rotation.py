@@ -29,22 +29,53 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 def hf_download(path_in_repo, dest):
-    """Pull a file from the rotation repo (follows xet/lfs automatically)."""
+    """Pull a file from the rotation repo. MISSING file = legit fresh start;
+    any OTHER error (auth, rate limit, network) = HARD EXIT — never fall back
+    to --from_scratch on a transient error and overwrite the shared checkpoint."""
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+    last_err = None
     for att in range(4):
         try:
             p = hf_hub_download(repo_id=HF_REPO, filename=path_in_repo,
                                 token=HF_TOKEN, local_dir=os.path.dirname(dest))
             return p
+        except (EntryNotFoundError, RepositoryNotFoundError):
+            print(f"[Kernel] {path_in_repo} not in rotation repo (legit first run)", flush=True)
+            return None
         except Exception as e:
+            last_err = e
             print(f"[Kernel] hf pull {path_in_repo} attempt {att+1}/4 failed: {e}", flush=True)
             time.sleep(30)
-    return None
+    raise SystemExit(f"FATAL: cannot pull {path_in_repo} from HF after 4 attempts "
+                     f"({last_err}). Refusing to start from scratch and destroy the "
+                     f"shared checkpoint.")
 
 def hf_upload(path, path_in_repo, msg):
+    """Upload with rewind guard: if the repo's current checkpoint is AHEAD of
+    ours (another account ran further), refuse to overwrite — last-writer-wins
+    would silently roll the run back."""
     from huggingface_hub import HfApi
     try:
         api = HfApi(token=HF_TOKEN)
+        if path_in_repo == "latest_checkpoint.pt":
+            try:
+                import torch as _t
+                import tempfile as _tf
+                remote = api.hf_hub_download(repo_id=HF_REPO, filename="latest_checkpoint.pt",
+                                             token=HF_TOKEN, cache_dir=_tf.mkdtemp())
+                ours = _t.load(path, map_location="cpu")
+                try:
+                    theirs = _t.load(remote, map_location="cpu")
+                except Exception:
+                    theirs = {"step": None}  # remote unreadable -> do not overwrite blindly
+                if theirs.get("step") is not None and (ours.get("step") or 0) < theirs.get("step", 0):
+                    print(f"[Kernel] REWIND GUARD: remote step {theirs['step']} > ours "
+                          f"{ours.get('step')} — NOT overwriting", flush=True)
+                    return True  # not an error; the newer state is already there
+                del ours, theirs
+            except FileNotFoundError:
+                pass  # first push, nothing to guard
         api.upload_file(path_or_fileobj=path, path_in_repo=path_in_repo,
                         repo_id=HF_REPO, repo_type="model", commit_message=msg)
         return True

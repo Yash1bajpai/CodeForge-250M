@@ -128,7 +128,12 @@ def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, la
         'loss': loss_val,
         'val_loss': val_loss,
     }
-    torch.save(state, latest_path)
+    # atomic write: a kill/OOM mid-save must never leave a truncated
+    # latest_checkpoint.pt (it propagates to the shared HF rotation repo and
+    # bricks every account's next resume)
+    tmp_path = latest_path + ".tmp"
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, latest_path)
     step_path = os.path.join(ckpt_dir, f"checkpoint_step_{step}.pt")
     torch.save(state, step_path)
     # B5 fix: rotate — keep only the newest `keep` step checkpoints
