@@ -68,7 +68,7 @@ Weighted multi-source corpus, all sources open/ungated on HuggingFace. Weights s
 - **Universal AST & Bracket Balancing:** Implemented full syntax validation and brace/parenthesis balancing across all programming languages.
 - **Exact Parameter Scaling Labels:** Calibrated architectures precisely:
   - `CodeForge-250M`: 16 Layers / 1024 Hidden (~246M Params)
-  - `CodeForge-500M`: 26 Layers / 1024 Hidden (~505M Params)
+  - `CodeForge-500M`: 26 Layers / 1280 Hidden (~505M Params)
   - `CodeForge-1B`: 38 Layers / 1536 Hidden (~1.04B Params)
 - **Distinct Vocabulary Collisions:** Defined separate, non-overlapping token IDs for `<|unk|>` (ID 1) and `<|pad|>` (ID 2).
 
