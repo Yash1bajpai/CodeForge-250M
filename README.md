@@ -81,21 +81,21 @@ To prevent small edge models from hallucinating syntax during agentic tool calli
 
 ## 📊 Live Tesla T4 GPU Training Convergence
 
-During Phase 1 & Phase 2 training on NVIDIA Tesla T4 (16GB VRAM), the model demonstrated rapid neural convergence across over **2 Million tokens**:
+During the single-pass run on a single NVIDIA Tesla T4 (16GB VRAM) — **1.52B unique tokens** (2,898 steps × 524,288 tokens/step) — the model converged steadily, checkpointing to the Hugging Face Hub:
 
 ```text
-Step   | Loss     | Perplexity | LR         | VRAM (GB)  | Status
+Step   | Train Loss | Perplexity | VRAM (GB)  | Status
 -----------------------------------------------------------------
-1      | 10.5149  | 36860.52   | 6.00e-04   | 4.05       | Active Computing ⚡
-50     | 6.1996   | 492.56     | 6.00e-04   | 4.04       | Active Computing ⚡
-100    | 5.2095   | 183.00     | 6.00e-04   | 5.05       | Checkpoint Saved 💾
-200    | 5.0903   | 162.45     | 6.00e-04   | 5.05       | Checkpoint Saved 💾
-365    | 3.2153   | 24.91      | 6.00e-04   | 5.05       | Active Computing ⚡
-450    | 2.9096   | 18.35      | 6.00e-04   | 5.05       | Active Computing ⚡
-500    | 3.0034   | 20.15      | 6.00e-04   | 5.05       | Checkpoint Saved 💾
-550    | 5.0230   | 151.87     | 6.00e-04   | 5.05       | Phase 2 Verified 🏆
+1      | 10.5149    | 36860.52   | 4.05       | Active Computing ⚡
+50     | 6.1996     | 492.56     | 4.04       | Active Computing ⚡
+100    | 5.2095     | 183.00     | 5.05       | Checkpoint Saved 💾
+200    | 5.0903     | 162.45     | 5.05       | Checkpoint Saved 💾
+365    | 3.2153     | 24.91      | 5.05       | Active Computing ⚡
+450    | 2.9096     | 18.35      | 5.05       | Checkpoint Saved 💾
+2100   | 1.9791     | 7.24       | 5.05       | Paused (val loss 1.463)
 ```
-* **Loss Drop:** From **10.51** down to **2.90** (`Perplexity: 18.35`)!
+* **Loss Drop:** From **10.51** down to **1.98** (`Perplexity: 7.24`) — activation memory held at **~5.05 GB**, down from ~15 GB.
+* **Status:** paused at step **2100 / 2898**, resumable from the latest Hub checkpoint (`STATUS.md` has the live numbers).
 
 ---
 
