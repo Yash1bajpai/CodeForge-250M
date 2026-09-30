@@ -21,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
 from models.architecture import CodeForgeModel
 from models.init_weights import init_model_weights
 from training.utils import get_lr_cosine_schedule
+from training.resume_safety import audit_shards, manifest_fingerprint, optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
 
 os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
 os.environ["WANDB_MODE"] = "disabled"
@@ -46,40 +47,25 @@ class LazyShardDataset(Dataset):
     Single-pass by design: the trainer consumes a shuffled shard order and
     NEVER wraps around (epoch guard lives in the training loop).
     """
-    def __init__(self, tokenized_dir: str, seq_length: int = 2048, shard_files=None):
+    def __init__(self, tokenized_dir: str, seq_length: int = 2048, shard_files=None, vocab_size=32000):
         self.seq_length = seq_length
         self.shard_files = shard_files if shard_files is not None else sorted(
             glob.glob(os.path.join(tokenized_dir, "shard_*.pt")))
         if not self.shard_files:
             raise SystemExit("ERROR: no shards in data/tokenized. Run the data pipeline first.")
-        probe = torch.load(self.shard_files[0], map_location="cpu")
-        self.shard_num_seqs = probe.shape[0] if isinstance(probe, torch.Tensor) else len(probe)
-        print(f"--> [DataLoader] {len(self.shard_files)} shards x ~{self.shard_num_seqs} seqs "
-              f"(~{len(self.shard_files) * self.shard_num_seqs * seq_length:,} tokens total)")
-        # Preload all shards into one shared-memory uint16 tensor (3.05 GB):
-        # per-sample torch.load of a 4MB shard was O(shard) per sequence and
-        # starved the GPU. share_memory_() lets DataLoader workers map it zero-copy.
-        total = len(self.shard_files) * self.shard_num_seqs
-        try:
-            self.data = torch.empty(total, seq_length, dtype=torch.uint16).share_memory_()
-        except Exception as e:
-            # Kaggle /dev/shm is ~64MB — a multi-GB shared tensor cannot fit there.
-            # Plain RAM is fine: forked DataLoader workers COW-share read-only pages.
-            print(f"--> [DataLoader] share_memory_ unavailable ({e}); falling back to plain RAM tensor", flush=True)
-            self.data = torch.empty(total, seq_length, dtype=torch.uint16)
-        from concurrent.futures import ThreadPoolExecutor
-        def _load_one(i_path):
-            i, path = i_path
-            t = torch.load(path, map_location="cpu")
-            return i, t
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for i, t in ex.map(_load_one, enumerate(self.shard_files)):
-                n = t.shape[0]
-                self.data[i * self.shard_num_seqs:(i * self.shard_num_seqs) + n] = t[:n]
-        print(f"--> [DataLoader] preloaded {total:,} seqs into shared memory "
-              f"({self.data.numel() * 2 / 1e9:.2f} GB)", flush=True)
+        self.audit_records = audit_shards(self.shard_files, seq_length, vocab_size, allow_partial=True)
+        self.rows = [r['rows'] for r in self.audit_records]
+        self.offsets = [0]
+        for n in self.rows:
+            self.offsets.append(self.offsets[-1]+n)
+        total = self.offsets[-1]
+        self.data = torch.empty(total, seq_length, dtype=torch.uint16)
+        for i,path in enumerate(self.shard_files):
+            t = torch.load(path,map_location='cpu',weights_only=True)
+            self.data[self.offsets[i]:self.offsets[i+1]] = t
+        print(f'--> [AuditedData] {len(self.shard_files)} shards, {total} real rows; no padding')
     def __len__(self):
-        return len(self.shard_files) * self.shard_num_seqs
+        return self.offsets[-1]
     def __getitem__(self, idx):
         seq = self.data[idx].long()  # uint16 -> long for embedding lookup
         x = seq[:-1]
@@ -120,13 +106,20 @@ def append_metric(metrics_path, entry):
         with open(metrics_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
-def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2):
+def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2, resume_state=None, scaler=None):
     state = {
         'step': step,
         'model_state_dict': raw_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss_val,
         'val_loss': val_loss,
+        'resume_state': resume_state,
+        'scaler_state_dict': scaler.state_dict() if scaler is not None else {},
+        'rng_state': {
+            'python': random.getstate(),
+            'torch_cpu': torch.get_rng_state(),
+            'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        },
     }
     # atomic write: a kill/OOM mid-save must never leave a truncated
     # latest_checkpoint.pt (it propagates to the shared HF rotation repo and
@@ -153,7 +146,11 @@ def train():
     parser.add_argument("--resume", action="store_true", help="Explicitly resume from latest_checkpoint.pt (B2: no silent resumes)")
     parser.add_argument("--config", type=str, default=os.path.join(PROJECT_ROOT, "configs/config_250M.yaml"))
     parser.add_argument("--max_hours", type=float, default=11.0, help="Wall-clock budget before clean stop (Kaggle ~12h limit)")
+    parser.add_argument("--session-steps", type=int, default=None, help="Bounded smoke test; does not change LR schedule")
+    parser.add_argument("--legacy-migration", type=str, help="Audited JSON identity/counter record for one legacy checkpoint")
     args = parser.parse_args()
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise SystemExit("This audited Stage A resume supports only one GPU.")
 
     # --- DDP setup (Kaggle T4 x2): env vars set by torchrun ---
     ddp_world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -260,7 +257,9 @@ def train():
     seq_len = cfg["max_position_embeddings"]
 
     # B3: tokenizer must be complete before anything trains
-    verify_tokenizer(os.path.join(PROJECT_ROOT, "data/tokenizer"))
+    tok = verify_tokenizer(os.path.join(PROJECT_ROOT, "data/tokenizer"))
+    if len(tok) != cfg['vocab_size']:
+        raise SystemExit('Tokenizer size differs from checkpoint/model config')
 
     # B7: hold out a deterministic slice of shards as the validation set
     all_shards = sorted(glob.glob(os.path.join(PROJECT_ROOT, "data/tokenized/shard_*.pt")))
@@ -292,17 +291,21 @@ def train():
 
     # --- B2: explicit resume only ---
     start_step = 0
+    checkpoint_state = None
+    resume_state = None
     loss_val, val_loss = 0.0, None
     if args.resume:
         if not os.path.exists(latest_path):
             raise SystemExit("ERROR: --resume passed but no latest_checkpoint.pt found.")
-        ckpt = torch.load(latest_path, map_location="cpu")  # cpu: avoid GPU memory spike during restore
+        ckpt = torch.load(latest_path, map_location="cpu", weights_only=True)  # cpu: avoid GPU memory spike during restore
         raw_model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         start_step = ckpt.get('step', 0)
         loss_val = ckpt.get('loss', 0.0)
         val_loss = ckpt.get('val_loss', None)
-        del ckpt
+        checkpoint_state = ckpt
+        if ckpt.get("scaler_state_dict"):
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"--> [Resume] Explicitly resumed from step {start_step} (loss {loss_val:.4f})")
@@ -315,11 +318,42 @@ def train():
         init_model_weights(raw_model, initializer_range=0.02)
         print("--> [From Scratch] Fresh random init at step 0")
 
+    if args.resume and checkpoint_state.get('resume_state') is None:
+        if not args.legacy_migration:
+            raise SystemExit('Legacy checkpoint: an audited migration record is required before resume.')
+        with open(args.legacy_migration) as f:
+            migration = json.load(f)
+        if migration.get('checkpoint_sha256') != file_sha256(latest_path):
+            raise SystemExit('Legacy checkpoint hash differs from audited migration.')
+        if migration.get('reported_step') != checkpoint_state.get('step'):
+            raise SystemExit('Legacy checkpoint counter differs from audited migration.')
+        checkpoint_state['resume_state'] = migration['resume_state']
+        start_step = migration['schedule_step']
+        if migration['resume_state']['legacy_sample_cursor'] != start_step * batch_size_per_device * accum_steps:
+            raise SystemExit('Audited legacy cursor and schedule do not agree')
+        print('--> [Migration] Legacy RNG/scaler history unavailable; exact bitwise replay is not claimed.')
+
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
     train_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
-                                     seq_length=seq_len, shard_files=train_shards)
+                                     seq_length=seq_len, shard_files=train_shards, vocab_size=cfg["vocab_size"])
     val_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
-                                   seq_length=seq_len, shard_files=val_shards)
+                                   seq_length=seq_len, shard_files=val_shards, vocab_size=cfg["vocab_size"])
+    all_records = sorted(train_dataset.audit_records + val_dataset.audit_records, key=lambda x:x['name'])
+    fingerprint = manifest_fingerprint(all_records, os.path.join(PROJECT_ROOT, 'data/tokenizer/tokenizer.json'))
+    seqs_per_step = batch_size_per_device * accum_steps * ddp_world
+    if checkpoint_state is not None:
+        resume_state = validate_resume_metadata(checkpoint_state, fingerprint, seqs_per_step)
+        if resume_state.get('order_version') != 'legacy-filtered-v1':
+            raise SystemExit('Unknown saved permutation identity')
+        rng_state = checkpoint_state.get('rng_state')
+        if rng_state:
+            random.setstate(rng_state['python'])
+            torch.set_rng_state(rng_state['torch_cpu'])
+            if torch.cuda.is_available() and rng_state.get('torch_cuda'):
+                torch.cuda.set_rng_state_all(rng_state['torch_cuda'])
+    else:
+        resume_state = {'schema_version':1, 'fingerprint':fingerprint, 'seqs_per_step':seqs_per_step,
+                        'sample_cursor':0, 'completed_updates':0, 'optimizer_step_count':0, 'order_version':'legacy-filtered-v1'}
     if is_ddp:
         import torch.distributed as dist
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -332,8 +366,11 @@ def train():
         # SAME order. On resume we start the sampler at the exact sample offset,
         # so the single pass continues where it stopped — no re-shuffle, no data
         # cycling (run-#1 killer #2).
-        _perm_gen = torch.Generator().manual_seed(42)
-        _perm = torch.randperm(len(train_dataset), generator=_perm_gen).tolist()
+        _perm, _valid = migrated_permutation(train_dataset.rows)
+        if resume_state.get('legacy_sample_cursor') is not None:
+            expected_cursor = int(_valid[:resume_state['legacy_sample_cursor']].sum())
+            if expected_cursor != resume_state['sample_cursor']:
+                raise SystemExit('Migration cursor does not match filtered legacy permutation')
 
         class _OrderedIndices(torch.utils.data.Sampler):
             def __init__(self, indices):
@@ -343,16 +380,19 @@ def train():
             def __len__(self):
                 return len(self.indices)
 
-        skip_samples = min(start_step * accum_steps * batch_size_per_device, len(_perm))
+        skip_samples = resume_state['sample_cursor']
+        if skip_samples > len(_perm):
+            raise SystemExit('Invalid saved sample cursor')
         if skip_samples:
             print(f"--> [Resume] data position: {skip_samples:,}/{len(_perm):,} samples already "
                   f"consumed — continuing single pass from there", flush=True)
         dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
                                 sampler=_OrderedIndices(_perm[skip_samples:]),
-                                num_workers=2, pin_memory=True, drop_last=True)
+                                num_workers=2, pin_memory=True, drop_last=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
                             num_workers=1, pin_memory=True, drop_last=True)
 
+    del checkpoint_state
     val_batches = []
     for i, b in enumerate(val_loader):
         val_batches.append(b)
@@ -385,6 +425,8 @@ def train():
     # SINGLE-PASS ITERATOR: StopIteration ends the run (epoch guard — run #1 fix)
     batch_generator = iter(dataloader)
     steps_planned = max_steps - start_step
+    if args.session_steps is not None:
+        steps_planned = min(steps_planned,args.session_steps)
 
     step = start_step
     epoch_done = False
@@ -392,11 +434,12 @@ def train():
     try:
       try:
         for step_offset in range(1, steps_planned + 1):
-            step = start_step + step_offset
+            next_step = start_step + step_offset
 
             # clock guard: clean stop before the wall kills us (rank0 decides,
             # broadcasts; both ranks break together to avoid NCCL desync)
-            wall_hit = (time.time() - start_time) / 3600.0 >= args.max_hours
+            wall_hit = ((time.time() - start_time) / 3600.0 >= args.max_hours
+                        or time.time() >= float(os.environ.get('CF_ABSOLUTE_STOP_EPOCH', 'inf')))
             if is_ddp:
                 t = torch.tensor([1 if wall_hit else 0], device=device)
                 torch.distributed.all_reduce(t)
@@ -406,11 +449,12 @@ def train():
                     watchdog_write("WALL_CLOCK_BUDGET")
                 break
 
-            current_lr = get_lr_cosine_schedule(step, warmup_steps, max_steps, max_lr, min_lr)
+            current_lr = get_lr_cosine_schedule(next_step, warmup_steps, max_steps, max_lr, min_lr)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
 
             step_loss = 0.0
+            batch_seqs = 0
             for micro_step in range(accum_steps):
                 try:
                     x, y = next(batch_generator)
@@ -421,9 +465,10 @@ def train():
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
                 with torch.amp.autocast('cuda', dtype=dtype):
                     logits, loss = model(x, y)
-                    scaled_loss = loss / accum_steps
+                    scaled_loss = loss * (x.shape[0] / seqs_per_step)
                 scaler.scale(scaled_loss).backward()
-                step_loss += loss.item() / accum_steps
+                step_loss += loss.item() * x.shape[0]
+                batch_seqs += x.shape[0]
                 # GLOBAL token count: per-rank numel x world (x is seq[:-1] = 2047 tok)
                 tokens_seen += x.numel() * ddp_world
             epoch_done = (batch_generator is None)
@@ -431,15 +476,28 @@ def train():
                 t = torch.tensor([1 if epoch_done else 0], device=device)
                 torch.distributed.all_reduce(t)
                 epoch_done = t.item() > 0
-            if epoch_done:
+            if epoch_done and batch_seqs == 0:
                 if is_main:
                     watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
                 break
 
+            if batch_seqs < seqs_per_step:
+                # Normalize the final partial batch by its actual example count.
+                for p in model.parameters():
+                    if p.grad is not None:
+                        p.grad.mul_(seqs_per_step / batch_seqs)
+            step_loss /= batch_seqs
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=train_cfg.get("max_grad_norm", 1.0))
+            previous_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            update_applied = scaler.get_scale() >= previous_scale
+            step = next_step
+            resume_state['sample_cursor'] += batch_seqs
+            resume_state.pop('legacy_sample_cursor', None)
+            resume_state['completed_updates'] += int(update_applied)
+            resume_state['optimizer_step_count'] = optimizer_step_counts(optimizer.state_dict())
             optimizer.zero_grad()
             loss_val = step_loss
 
@@ -447,7 +505,7 @@ def train():
             # x carries seq[:-1] (2047 of 2048 tokens) — 0.05% under is expected.
             expected_tokens_per_step = seqs_per_step * seq_len * (1 - 1.0 / seq_len)
             actual = tokens_seen / step_offset
-            mismatch = step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step
+            mismatch = not epoch_done and step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step
             if is_ddp:
                 t = torch.tensor([1 if mismatch else 0], device=device)
                 torch.distributed.all_reduce(t)
@@ -513,10 +571,15 @@ def train():
                     or (time.time() - last_save_time) >= save_interval_sec):
                 if is_main:
                     step_path = save_checkpoint(raw_model, optimizer, step, loss_val, val_loss,
-                                                ckpt_dir, latest_path)
+                                                ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
                     last_save_time = time.time()
                     print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
                     append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
+
+            if epoch_done:
+                if is_main:
+                    watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
+                break
 
             stop_requested = False
             if is_main:
@@ -548,8 +611,8 @@ def train():
         _TELEMETRY_STOP.set()  # stop the live telemetry daemon before exit
         if _telemetry_thread is not None and _telemetry_thread.is_alive():
             _telemetry_thread.join(timeout=30)
-        if batch_generator is not None and step > start_step and is_main:
-            save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path)
+        if step > start_step and is_main and not crashed:
+            save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
             print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)
             append_metric(metrics_path, {"event": "FINAL", "step": step,
                                          "clean": not crashed, "ts": time.time()})
