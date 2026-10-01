@@ -4,7 +4,8 @@
 import os, sys, subprocess, pathlib, shutil, glob, json, time
 START = time.time()
 os.environ.update(HF_HUB_DISABLE_PROGRESS_BARS='1', WANDB_MODE='disabled', CF_TELEMETRY_DISABLED='1',
-                  CUDA_VISIBLE_DEVICES='0', TOKENIZERS_PARALLELISM='false')
+                  CUDA_VISIBLE_DEVICES='0', TOKENIZERS_PARALLELISM='false',
+                  PYTORCH_ALLOC_CONF='expandable_segments:True')
 os.environ['CF_ABSOLUTE_STOP_EPOCH'] = str(START + 6.5 * 3600)
 from kaggle_secrets import UserSecretsClient
 TOKEN = UserSecretsClient().get_secret('HF_TOKEN'); os.environ['HF_TOKEN'] = TOKEN
