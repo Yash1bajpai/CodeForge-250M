@@ -1,0 +1,50 @@
+# Stage A2: short continuation of Stage A on FIM-fixed data (FIM only on code corpora).
+# Warm start from the Stage A checkpoint weights (python training/train.py --init_from ...),
+# fresh optimizer, low LR. Same model/tokenizer/mix weights as config_250M.yaml.
+model:
+  name: "CodeForge-250M"
+  vocab_size: 32000
+  hidden_size: 1024
+  intermediate_size: 2816
+  num_hidden_layers: 16
+  num_attention_heads: 16
+  num_key_value_heads: 4
+  max_position_embeddings: 2048
+  rms_norm_eps: 1e-5
+  rope_theta: 10000.0
+  tie_word_embeddings: false
+  use_cache: true
+
+data:
+  dataset_name: "multi-source-nexus-agent-a2"
+  seq_length: 2048
+  languages: ["starcoder-python", "codeparrot-clean", "fineweb-edu", "evol-codealpaca", "glaive-function-calling", "commitpackft-python"]
+  language_weights: [0.56, 0.22, 0.135, 0.053, 0.025, 0.007]
+  target_tokens: 170000000  # raw budget; ~65% survives filter+dedup, ~110M tokens ~ 200 steps
+
+training:
+  batch_size_per_device: 8
+  gradient_accumulation_steps: 32
+  total_batch_size_sequences: 256
+  learning_rate: 2.0e-4
+  min_learning_rate: 2.0e-5
+  warmup_steps: 20
+  max_steps: 150
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  optimizer: "AdamW"
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-8
+  precision: "bf16"
+
+checkpointing:
+  save_steps: 50
+  save_time_interval_minutes: 20
+  output_dir: "checkpoints/CodeForge-250M-a2"
+  push_to_hub: false
+
+logging:
+  wandb_project: "CodeForge"
+  wandb_run_name: "250M-stageA2-fimfix"
+  log_steps: 10
