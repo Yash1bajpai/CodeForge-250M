@@ -13,6 +13,8 @@ TOKEN_HEAL = os.environ.get("CF_HEAL","1")=="1"
 MIN_NEW = int(os.environ.get("CF_MIN_NEW","0"))
 MB_STYLE = os.environ.get("CF_MB_STYLE","doc")
 MAX_NEW = int(os.environ.get("CF_MAX_NEW", "320"))
+CKPT_FILE = os.environ.get("CF_CKPT_FILE", "latest_checkpoint.pt")   # e.g. stageA2/latest_checkpoint.pt
+EVAL_TAG = os.environ.get("CF_EVAL_TAG", f"stage_a_{REV[:8]}")
 OUT = "/kaggle/working" if os.path.isdir("/kaggle/working") else "/tmp/cf_out"
 os.makedirs(OUT, exist_ok=True)
 
@@ -56,7 +58,7 @@ _SPECIALS = ["<|endoftext|>","<|unk|>","<|pad|>","<|fim_prefix|>","<|fim_middle|
 BAN_IDS = sorted({tok.convert_tokens_to_ids(t) for t in _SPECIALS} - {EOS, None})
 print("special ids", {t: tok.convert_tokens_to_ids(t) for t in _SPECIALS}, flush=True)
 print("tokenizer", len(tok), "eos", EOS, "banned special ids", BAN_IDS, "EOS_PREFIX", EOS_PREFIX, "BAN", BAN, flush=True)
-ck_path = hf_hub_download(HF_REPO, "latest_checkpoint.pt", revision=REV, token=tok_secret)
+ck_path = hf_hub_download(HF_REPO, CKPT_FILE, revision=REV, token=tok_secret)
 ck = torch.load(ck_path, map_location="cpu", weights_only=False)
 print("ckpt keys", [k for k in ck.keys()][:20], "step", ck.get("step") or ck.get("global_step") or ck.get("optimizer_step_count"), flush=True)
 sd = {k.replace("_orig_mod.", "").replace("module.", ""): v for k, v in ck["model_state_dict"].items()}
@@ -220,7 +222,7 @@ try:
     from huggingface_hub import HfApi
     api = HfApi(token=tok_secret)
     for f in ("eval_results.json", "humaneval_samples.json", "mbpp_samples.json"):
-        api.upload_file(path_or_fileobj=f"{OUT}/{f}", path_in_repo=f"eval/stage_a_{REV[:8]}/{f}", repo_id=HF_REPO, commit_message="Stage A eval results")
+        api.upload_file(path_or_fileobj=f"{OUT}/{f}", path_in_repo=f"eval/{EVAL_TAG}/{f}", repo_id=HF_REPO, commit_message="Stage A eval results")
     print("uploaded eval results to HF", flush=True)
 except Exception as e:
     print("HF upload failed", e, flush=True)
