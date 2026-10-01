@@ -23,8 +23,8 @@ data:
   target_tokens: 170000000  # raw budget; ~65% survives filter+dedup, ~110M tokens ~ 200 steps
 
 training:
-  batch_size_per_device: 8
-  gradient_accumulation_steps: 32
+  batch_size_per_device: 4
+  gradient_accumulation_steps: 64
   total_batch_size_sequences: 256
   learning_rate: 2.0e-4
   min_learning_rate: 2.0e-5
