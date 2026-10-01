@@ -1,19 +1,9 @@
-import os
-import torch
-from models.architecture import CodeForgeModel
+"""HumanEval + MBPP pass@1 runner for CodeForge-250M (greedy, KV-cache decoding).
 
-def evaluate_code_model(benchmark_name: str = "HumanEval", checkpoint_path: str = "checkpoints/CodeForge-250M/latest_checkpoint.pt"):
-    """
-    Code Evaluation Runner for HumanEval Benchmark.
-    Loads trained CodeForge-250M checkpoint, generates completions for HumanEval prompts
-    using temperature=0.2 and top-p=0.95 sampling, and computes exact pass@1 metric.
-    Target for 250M on 2.35B+ tokens: HumanEval pass@1 ~5-10%.
-    """
-    print(f"--> [{benchmark_name} Evaluation] Loading benchmark prompts and initializing evaluation harness...")
-    if os.path.exists(checkpoint_path):
-        print(f"    --> Found checkpoint: {checkpoint_path}. Ready to run generation evaluation.")
-    else:
-        print(f"    --> [Notice] No checkpoint found at {checkpoint_path}. Harness verified and ready for post-training evaluation.")
-
-if __name__ == "__main__":
-    evaluate_code_model("HumanEval")
+Runs both benchmarks via evaluation/codeforge_eval.py with the MBPP prompt protocol used for the
+Stage A report (CF_MB_STYLE=named). Needs HF_TOKEN (env or Kaggle secret) and internet.
+Stage A result (HF rev 2542b768, step 2898): HumanEval 7/164 = 4.27%, MBPP 13/500 = 2.60%.
+"""
+import os, runpy
+os.environ.setdefault("CF_MB_STYLE", "named")
+runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "codeforge_eval.py"), run_name="__main__")
