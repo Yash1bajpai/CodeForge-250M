@@ -147,6 +147,7 @@ def train():
     parser.add_argument("--config", type=str, default=os.path.join(PROJECT_ROOT, "configs/config_250M.yaml"))
     parser.add_argument("--max_hours", type=float, default=11.0, help="Wall-clock budget before clean stop (Kaggle ~12h limit)")
     parser.add_argument("--session-steps", type=int, default=None, help="Bounded smoke test; does not change LR schedule")
+    parser.add_argument("--init_from", type=str, default=None, help="Warm start: load MODEL WEIGHTS ONLY from this checkpoint (step 0, fresh optimizer/schedule/data cursor). Never overwrites the source file.")
     parser.add_argument("--legacy-migration", type=str, help="Audited JSON identity/counter record for one legacy checkpoint")
     args = parser.parse_args()
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
@@ -309,6 +310,16 @@ def train():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"--> [Resume] Explicitly resumed from step {start_step} (loss {loss_val:.4f})")
+    elif args.init_from:
+        if os.path.exists(latest_path):
+            raise SystemExit("ERROR: --init_from needs an empty checkpoint dir (latest_checkpoint.pt exists).")
+        _src = torch.load(args.init_from, map_location="cpu", weights_only=True)
+        raw_model.load_state_dict(_src['model_state_dict'])
+        print(f"--> [Warm start] weights only from {args.init_from} (source step {_src.get('step')}, "
+              f"val_loss {_src.get('val_loss')}); optimizer, LR schedule and data cursor start fresh", flush=True)
+        del _src
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     elif os.path.exists(latest_path) and not args.from_scratch:
         raise SystemExit("ERROR: latest_checkpoint.pt exists. Pass --resume to continue it, "
                          "or --from_scratch to discard it. Silent resume is forbidden (B2).")
