@@ -7,11 +7,27 @@ from transformers import PreTrainedTokenizerFast
 
 random.seed(42)  # deterministic FIM splits -> identical shards on re-runs (resume safety)
 
+# FIM is applied ONLY to plain source-code corpora. Prose (fineweb-edu), chat /
+# instruction data (evol-codealpaca), tool-call data (glaive) and commitpackft
+# (already carries its own prefix/middle format) must never get FIM tokens:
+# applying FIM there taught the model to emit FIM tokens on normal prompts.
+FIM_SOURCES = ("starcoder-python", "codeparrot-clean")
+FIM_TOKENS = ("<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>")
+
+def source_name(file_path: str) -> str:
+    """'data/dedup/starcoder-python_dedup.jsonl' -> 'starcoder-python'"""
+    return os.path.basename(file_path).split("_")[0]
+
+def fim_allowed(source: str) -> bool:
+    return source in FIM_SOURCES
+
 def apply_fim_transformation(code: str, fim_rate: float = 0.50) -> str:
     """
-    Applies Fill-In-the-Middle (FIM) transformation at a 50% rate (StarCoder / DeepSeek-Coder standard).
-    Crucial for DevMind / Nexus-Agent infill() primitive.
+    Applies Fill-In-the-Middle (FIM) transformation at fim_rate (default 50%) to code documents.
+    Callers must only pass code-corpus documents (see fim_allowed).
     """
+    if any(t in code for t in FIM_TOKENS):
+        return code  # already formatted, never double-wrap
     if random.random() > fim_rate or len(code) < 50:
         return code
     lines = code.splitlines()
@@ -53,7 +69,10 @@ def build_tokenized_dataset(dedup_dir: str = "data/dedup", tokenizer_dir: str = 
                 except Exception:
                     code = line.replace("\\n", "\n")
                     
-                code_fim = apply_fim_transformation(code, fim_rate=0.50)
+                if fim_allowed(source_name(file_path)):
+                    code_fim = apply_fim_transformation(code, fim_rate=0.50)
+                else:
+                    code_fim = code
                 tokens = tokenizer.encode(code_fim) + [eos_id]
                 all_tokens.extend(tokens)
                 
