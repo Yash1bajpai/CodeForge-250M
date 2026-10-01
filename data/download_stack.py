@@ -80,6 +80,12 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
             print(f"    [Warning] Could not stream {repo} ({e}). Skipping source to avoid fallback contamination.")
             continue
 
+        # CF_SKIP_FRACTION_OF_STAGE_A=1: skip the documents Stage A already trained on
+        # (its per-source char budget: 2.35B tokens x 4 chars x weight) so a follow-up
+        # phase sees fresh documents, not a replay of the first ones in each stream.
+        skip_chars = int(2350000000 * 4 * dict(zip(sources, weights)).get(src, 0)) \
+            if os.environ.get("CF_SKIP_STAGE_A_DOCS") == "1" else 0
+        skipped = 0
         char_count = 0
         with open(out_file, "w", encoding="utf-8") as out_f:
             for sample in ds:
@@ -104,6 +110,9 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
                 else:
                     code = sample.get("content") or sample.get("code") or sample.get("text") or ""
                     
+                if skipped < skip_chars:
+                    skipped += len(code) if isinstance(code, str) else 0
+                    continue
                 if isinstance(code, str) and len(code) > 20:
                     out_f.write(json.dumps({"text": code}, ensure_ascii=False) + "\n")
                     char_count += len(code)
