@@ -7,6 +7,17 @@
 
 **CodeForge-250M** is a custom 246 Million parameter edge-optimized AI coding model built from scratch. Designed specifically to power our autonomous software agent framework **nexus-agent** (formerly DevMind), Nexus-Agent combines high-speed code completion, Fill-In-the-Middle (FIM) code editing, and structured ReAct reasoning into a compact, memory-efficient neural architecture.
 
+## 📊 Stage A benchmark results
+
+Measured on the Stage A checkpoint (step 2,898; one pass over approximately 1.52B tokens) at Hugging Face revision `2542b76813c0323db7325a0dfed56431964edbf5`, using greedy pass@1:
+
+| Benchmark | Result |
+|---|---:|
+| HumanEval (164 problems) | 7/164 (4.27%) |
+| MBPP full test set (500 problems) | 13/500 (2.60%) |
+
+These are measured results, not expected targets. The evaluation protocol and its limitations are documented in [`evaluation/codeforge_eval.py`](evaluation/codeforge_eval.py). In particular, prompt/decoding choices were tuned on the first 40 problems of each benchmark, so the scores may be optimistic. The checkpoint also showed FIM-token leakage and early stopping on plain completion prompts.
+
 ---
 
 ## 📚 Training Data Curriculum (Run #2 → 10B Scale-Up)
