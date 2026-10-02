@@ -21,6 +21,10 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
                 sources = cfg["data"].get("languages", sources)
                 weights = cfg["data"].get("language_weights", weights)
                 
+    # Explicit per-source offsets avoid silently applying Stage A's large budget
+    # to a finite instruction corpus. Caller records any intentional replay.
+    skip_chars_by_source = cfg.get("data", {}).get("skip_chars_by_source", {}) if os.path.exists(config_path) else {}
+    source_stats = {}
     # Approximate 4 characters per token
     target_chars_per_src = {src: int(target_tokens * 4 * w) for src, w in zip(sources, weights)}
     print(f"--> [Data Pipeline] Starting Production Multi-Source Streaming Download (Target Tokens: {target_tokens:,})...")
@@ -85,7 +89,11 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
         # phase sees fresh documents, not a replay of the first ones in each stream.
         skip_chars = int(2350000000 * 4 * dict(zip(sources, weights)).get(src, 0)) \
             if os.environ.get("CF_SKIP_STAGE_A_DOCS") == "1" else 0
+        skip_chars = int(skip_chars_by_source.get(src, skip_chars))
+        if skip_chars < 0:
+            raise ValueError("Negative source skip offset")
         skipped = 0
+        docs_written = 0
         char_count = 0
         with open(out_file, "w", encoding="utf-8") as out_f:
             for sample in ds:
@@ -116,9 +124,17 @@ def download_curated_stack(config_path: str = "configs/config_250M.yaml", output
                 if isinstance(code, str) and len(code) > 20:
                     out_f.write(json.dumps({"text": code}, ensure_ascii=False) + "\n")
                     char_count += len(code)
+                    docs_written += 1
                 if char_count >= max_chars:
                     break
+        source_stats[src] = {"requested_skip_chars": skip_chars, "actual_skipped_chars": skipped,
+                             "written_chars": char_count, "documents": docs_written}
+        if char_count == 0:
+            raise RuntimeError(f"Source {src} empty after offset {skip_chars}; refusing incomplete mix")
         print(f"    --> Saved {char_count:,} chars (~{char_count//4:,} tokens) for {src} to {out_file}")
+
+    with open(os.path.join(output_dir, "source_stats.json"), "w") as f:
+        json.dump(source_stats, f, indent=2)
 
 if __name__ == "__main__":
     download_curated_stack()
