@@ -193,6 +193,19 @@ def train():
     os.makedirs(ckpt_dir, exist_ok=True)
     latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
 
+    uploader = None
+    if (full_cfg.get("checkpointing", {}).get("push_to_hub")
+            and full_cfg["checkpointing"].get("hf_path_prefix")):
+        from huggingface_hub import HfApi
+        from training.checkpoint_upload import SafeCheckpointUploader
+        cc = full_cfg["checkpointing"]
+        uploader = SafeCheckpointUploader(HfApi(token=os.environ.get("HF_TOKEN")),
+                                          cc["hf_repo_id"], cc["hf_path_prefix"])
+    def upload_saved(step):
+        if uploader is not None:
+            revision = uploader.upload(latest_path, step)
+            print(f"--> [HF verified] step={step} revision={revision}", flush=True)
+
     # LIVE TELEMETRY: push metrics + log tail to a tiny Kaggle dataset every
     # 15 min so the outside-world supervisor (agy) can watch the run while the
     # session is still going. Failures must NEVER touch training.
@@ -583,6 +596,7 @@ def train():
                 if is_main:
                     step_path = save_checkpoint(raw_model, optimizer, step, loss_val, val_loss,
                                                 ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
+                    upload_saved(step)
                     last_save_time = time.time()
                     print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
                     append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
@@ -624,6 +638,7 @@ def train():
             _telemetry_thread.join(timeout=30)
         if step > start_step and is_main and not crashed:
             save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
+            upload_saved(step)
             print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)
             append_metric(metrics_path, {"event": "FINAL", "step": step,
                                          "clean": not crashed, "ts": time.time()})
