@@ -1,0 +1,65 @@
+# A3-v2: Evol and Glaive intentionally reuse their starts; code offsets estimated.
+model:
+  name: CodeForge-250M
+  vocab_size: 32000
+  hidden_size: 1024
+  intermediate_size: 2816
+  num_hidden_layers: 16
+  num_attention_heads: 16
+  num_key_value_heads: 4
+  max_position_embeddings: 2048
+  rms_norm_eps: 1e-5
+  rope_theta: 10000.0
+  tie_word_embeddings: false
+  use_cache: true
+data:
+  dataset_name: multi-source-codeforge-a3
+  seq_length: 2048
+  languages:
+  - starcoder-python
+  - codeparrot-clean
+  - fineweb-edu
+  - evol-codealpaca
+  - glaive-function-calling
+  - commitpackft-python
+  language_weights:
+  - 0.56
+  - 0.22
+  - 0.135
+  - 0.053
+  - 0.025
+  - 0.007
+  target_tokens: 200000000
+  skip_chars_by_source:
+    starcoder-python: 5644800000
+    codeparrot-clean: 2217600000
+    fineweb-edu: 1360800000
+    evol-codealpaca: 0
+    glaive-function-calling: 0
+    commitpackft-python: 70560000
+training:
+  batch_size_per_device: 4
+  gradient_accumulation_steps: 64
+  total_batch_size_sequences: 256
+  learning_rate: 0.0001
+  min_learning_rate: 1.0e-05
+  warmup_steps: 10
+  max_steps: 180
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  optimizer: AdamW
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-08
+  precision: bf16
+checkpointing:
+  save_steps: 25
+  save_time_interval_minutes: 20
+  output_dir: checkpoints/CodeForge-250M-a3
+  push_to_hub: true
+  hf_repo_id: Yash1bajpai/CodeForge-250M-rotation
+  hf_path_prefix: stageA3-v2
+logging:
+  wandb_project: CodeForge
+  wandb_run_name: 250M-stageA3-continuation
+  log_steps: 10
