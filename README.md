@@ -39,6 +39,15 @@ python evaluation/humaneval_runner.py
 
 The harness expects access to the private checkpoint through `HF_TOKEN` or a Kaggle secret named `HF_TOKEN`. Keep tokens in a secret store or the environment, never in source files. It installs missing evaluation dependencies and uploads results to the checkpoint repository by default; set `CF_NOUPLOAD=1` to disable uploads. Model architecture is fetched from GitHub master, so pin that code as well when reproducing results.
 
+## Progress update - October 2, 2026
+
+- **Stage A2 completed:** 150-step weights-only continuation on code-only FIM data. HumanEval remained **7/164 (4.27%)** and MBPP **13/500 (2.60%)**, under the same previously tuned greedy protocol. No benchmark improvement is claimed.
+- **Data-format fix:** FIM is now applied only to StarCoder/Python and CodeParrot code; prose, instruction and tool-call data are not FIM-transformed. CommitPackFT is not double-wrapped.
+- **A3 preparation:** the corrected build completed with 61 shards, 60,459 sequences (123,820,032 tokens), 18,989 retained Evol documents and 8,609 retained Glaive documents. All 61 tensors and the manifest were independently read back from the private `stageA3-v2/` folder. Evol/Glaive examples may repeat earlier training; code-stream offsets are estimates, not proof of disjoint data.
+- **Training safeguards prepared:** isolated checkpoint uploads with remote size readback, periodic saves and an absolute wall-clock deadline. The code/config and tests are published. These safeguards do not guarantee a better benchmark score.
+- **Stage A3 result:** A3 stopped cleanly at step 38 after 19,913,216 training tokens in a one-hour-cap chunk. The isolated step-38 checkpoint was uploaded/read back and evaluated: HumanEval 7/164 (4.27%, unchanged), MBPP 14/500 (2.80%, one extra problem versus A2). Total job runtime including evaluation was 76m25s. This small change does not establish broad improvement. Stage A2 stays untouched; A3 is not promoted.
+- **Tool calling remains a goal:** assistant/tool-token-focused SFT using Vision action and nexus-agent tool schemas, plus separate tool-selection, argument and execution tests. The serving bridge remains a stub.
+
 ## Architecture
 
 The 250M configuration uses:
