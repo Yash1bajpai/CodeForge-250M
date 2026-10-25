@@ -60,16 +60,26 @@ class LazyShardDataset(Dataset):
             self.offsets.append(self.offsets[-1]+n)
         total = self.offsets[-1]
         self.data = torch.empty(total, seq_length, dtype=torch.uint16)
+        self.valid = torch.full((total,), seq_length, dtype=torch.int32)  # real tokens per row; rest is EOS padding (loss-masked)
         for i,path in enumerate(self.shard_files):
             t = torch.load(path,map_location='cpu',weights_only=True)
             self.data[self.offsets[i]:self.offsets[i+1]] = t
+            side = os.path.join(os.path.dirname(path), os.path.basename(path).replace('shard_', 'valid_', 1))
+            if os.path.exists(side):
+                vl = torch.load(side, map_location='cpu', weights_only=True)['valid_len'].to(torch.int32)
+                if vl.shape[0] != t.shape[0] or int(vl.min()) < 2 or int(vl.max()) > seq_length:
+                    raise SystemExit(f'Bad valid_len sidecar for {os.path.basename(path)}')
+                self.valid[self.offsets[i]:self.offsets[i+1]] = vl
         print(f'--> [AuditedData] {len(self.shard_files)} shards, {total} real rows; no padding')
     def __len__(self):
         return self.offsets[-1]
     def __getitem__(self, idx):
         seq = self.data[idx].long()  # uint16 -> long for embedding lookup
         x = seq[:-1]
-        y = seq[1:]
+        y = seq[1:].clone()
+        v = int(self.valid[idx])
+        if v < seq.shape[0]:
+            y[v-1:] = -100  # targets at padded positions: ignored by F.cross_entropy (default ignore_index)
         return x, y
 
 def verify_tokenizer(tokenizer_dir: str):
@@ -150,8 +160,10 @@ def train():
     parser.add_argument("--init_from", type=str, default=None, help="Warm start: load MODEL WEIGHTS ONLY from this checkpoint (step 0, fresh optimizer/schedule/data cursor). Never overwrites the source file.")
     parser.add_argument("--legacy-migration", type=str, help="Audited JSON identity/counter record for one legacy checkpoint")
     args = parser.parse_args()
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-        raise SystemExit("This audited Stage A resume supports only one GPU.")
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and os.environ.get("CF_ALLOW_DDP") != "1":
+        raise SystemExit("This audited Stage A resume supports only one GPU (set CF_ALLOW_DDP=1 for the fresh-start DDP trial; --resume is not supported under DDP).")
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.resume or args.legacy_migration):
+        raise SystemExit("DDP trial path does not support --resume.")
 
     # --- DDP setup (Kaggle T4 x2): env vars set by torchrun ---
     ddp_world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -283,6 +295,10 @@ def train():
     rng.shuffle(all_shards)
     n_val = max(1, int(len(all_shards) * 0.005))
     val_shards, train_shards = all_shards[:n_val], all_shards[n_val:]
+    if os.environ.get("CF_VAL_DIR"):  # dedicated held-out eval rows; train on ALL shards
+        val_shards = sorted(glob.glob(os.path.join(os.environ["CF_VAL_DIR"], "shard_*.pt")))
+        train_shards = all_shards
+        if not val_shards: raise SystemExit("CF_VAL_DIR has no shard_*.pt")
     print(f"--> [B7] {len(train_shards)} train shards / {len(val_shards)} val shards (0.5% held out)")
 
     model = CodeForgeModel(cfg).to(device)
@@ -489,7 +505,7 @@ def train():
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
                 with torch.amp.autocast('cuda', dtype=dtype):
                     logits, loss = model(x, y)
-                    scaled_loss = loss * (x.shape[0] / seqs_per_step)
+                    scaled_loss = loss * (x.shape[0] * ddp_world / seqs_per_step)  # x ddp_world: DDP all-reduce averages over ranks; verified 1.0x vs single-process on CPU
                 scaler.scale(scaled_loss).backward()
                 step_loss += loss.item() * x.shape[0]
                 batch_seqs += x.shape[0]
