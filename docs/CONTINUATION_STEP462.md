@@ -22,14 +22,14 @@ This note records what was run and measured after the Stage A gate (step 100). I
 Same harness (`evaluation/cf_score.py`, SHA-256 6429ee43...), prompts, greedy decoding, 320-token cap. Generated programs were exported on Kaggle and never executed there.
 | Benchmark | A2 | gate (100) | step 420 | step 462 |
 | --- | --- | --- | --- | --- |
-| HumanEval (164), passed | 7 | 6 | 5 | export done (164/164), isolated scoring pending |
-| MBPP 2-shot (500), passed | 5 | 5 | 9 | export done (500/500), isolated scoring pending |
-| Fresh tasks (24), passed | 0 | 1 | 0 | export done (24/24), isolated scoring pending |
+| HumanEval (164), passed | 7 | 6 | 5 | 6 |
+| MBPP 2-shot (500), passed | 5 | 5 | 9 | 9 |
+| Fresh tasks (24), passed | 0 | 1 | 0 | 0 |
 
-Counts are small and descriptive. Earlier paired comparisons were not significant.
+Step 462 was scored in an isolated sandbox: all 688 programs covered, no timeouts, no setup failures. Counts are small and descriptive. Movements of one or a few problems are not robust, no paired test shows a change, and this is not proof of no change. No coding-ability gain is shown.
 
 ## Limits
-- HumanEval and MBPP are public; overlap with pretraining text was not audited.
+- HumanEval and MBPP are known to be contaminated for Stage A, and the MBPP prompts show the tests.
 - The 24 fresh tasks are a small custom set.
 - The 162-of-164 cap-hit finding applies to gate raw outputs, not step 420.
 - No separate validation set for model selection exists.
