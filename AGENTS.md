@@ -13,7 +13,8 @@ The active fresh plan is `fresh-20261025`: random initialization, 245,924,864 pa
 | `configs/config_250M_fresh.yaml` | Fresh model/training plan and explicit approval gate |
 | `configs/fresh_data_pilot.yaml`, `data/prepare_fresh.py` | Bounded CPU preparation pilot |
 | `scripts/phone_shell.sh`, `scripts/setup_phone.sh` | Native Termux Debian launcher and Debian controller installation |
-| `scripts/phone_control.py` | Phone status and explicit Drive probe; no training launch |
+| `scripts/phone_omp.sh`, `scripts/phone_check.sh`, `scripts/install_phone_commands.sh` | Native Termux `omp`/`cf-check` commands and installation |
+| `scripts/phone_control.py` | Aggregate `check`, status and explicit Drive probe; no training launch |
 | `scripts/kaggle_drive_backup.py` | Owner-only saved-output download to a fresh local staging directory |
 | `scripts/push_cpu_prep.py` | Explicit CPU preparation submission, not authorized by migration |
 | `kaggle/` | Cloud notebook sources; default metadata can target training |
@@ -25,13 +26,14 @@ The active fresh plan is `fresh-20261025`: random initialization, 245,924,864 pa
 
 ## Settled operation and safety
 
-- The phone is a controller, not a training/data-processing host. Native Termux launches Debian with `codeforge` (`scripts/phone_shell.sh`); source, cloud credentials and evidence directories are shared into Debian. Workspace: `~/projects/own_llm/CodeForge-250M_win`; external control state: `~/projects/own_llm/.watch`; staging/evidence: `~/codeforge-storage`.
+- The phone is a controller, not a training/data-processing host. Native Termux `omp` opens this project with Antigravity; `cf-check` verifies services with a private report. `codeforge` (`scripts/phone_shell.sh`) remains the advanced Debian shell. Workspace: `~/projects/own_llm/CodeForge-250M_win`; external control state: `~/projects/own_llm/.watch`; staging/evidence: `~/codeforge-storage`.
 - Only Kaggle owner `yashbajpai2027` is enabled. Large datasets/checkpoints stay cloud-side. HF checkpoint repository: `Yash1bajpai/CodeForge-250M-rotation`.
 - Do not launch GPU jobs, model training, or additional CPU preparation during migration. Notify the owner before any GPU/training launch and obtain explicit approval. `CF_TRAINING_APPROVED=1` belongs only on an explicitly approved cloud training invocation, never in phone startup/environment files.
 - Keep secrets outside Git and never print values. Kaggle owner token: `~/.kaggle/access_token`; rclone config: `~/.config/rclone/rclone.conf`; SSH keys/authorized keys: `~/.ssh/`; optional private environment file: `~/.config/codeforge/control.env`.
 - Backups download to fresh LOCAL staging first. `kaggle_drive_backup.py` does not upload to Drive. Use `rclone copy`, never `sync`, followed by explicit cloud readback/check evidence.
 - Preserve intentional uncommitted work and legacy external `.watch` scripts. The historical Windows rotation/watchdog scripts must not auto-start on the phone.
 - Do not install the full ML `requirements.txt` in Termux. Use the phone-specific dependency instructions.
+- Honor the Codex revocation/fresh-login gate in private `~/codeforge-storage/logs/provider-verification.json`. An imported credential or successful local login does not prove a compromised authorization was revoked.
 
 ## Evidence and remaining gates
 

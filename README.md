@@ -221,13 +221,17 @@ October 26, 2026. Windows is not required for normal phone-side control.
 Legacy Windows rotation/watchdog files are preserved references, not phone
 startup services.
 
-After phone setup, the read-only control-plane check and explicit Drive storage
-probe are:
+From native Termux's normal `$` prompt, run one short command:
 
-```sh
-python scripts/phone_control.py status
-python scripts/phone_control.py drive-probe --remote codeforge-drive:codeforge-storage
-```
+| Command | Purpose |
+|---|---|
+| `omp` | Open the project using the verified Antigravity login |
+| `cf-check` | Live provider/cloud verification with PASS/FAIL/ACTION results and an automatic private report |
+
+No manual Debian activation or long model selector is needed for these commands.
+The native installer is `scripts/install_phone_commands.sh`; supplied OMP
+arguments and subcommands still work normally. Codex remains blocked by any
+outstanding private revocation/re-login security gate; the checker does not hide it.
 
 These do not authorize training or another CPU preparation. Never place
 `CF_TRAINING_APPROVED=1` in phone startup files; only a separately approved cloud

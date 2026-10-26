@@ -63,24 +63,25 @@ The original project conversation was privately restored through `omp session pa
 
 Use mode 700 for private configuration directories and 600 for secret/config/key files as appropriate. Never commit an environment file or paste token values into commands retained in shell history. Transfer secrets over the established private channel; source archives must exclude them.
 
-Use `scripts/setup_phone.sh` inside Debian to install controller tools and `scripts/requirements-phone.txt`, not root `requirements.txt`. Normal dependency resolution is supported inside Debian, including Linux wheels; native Termux is not the controller's Python environment. The phone does not need torch, deepspeed, transformers, datasets, training tokenizer builds or GPU packages. Native Termux's `hf-xet`/other compiled dependency issues are avoided rather than silently replacing those libraries.
+Use `scripts/setup_phone.sh` inside Debian to install controller tools and `scripts/requirements-phone.txt`, not root `requirements.txt`. Native commands are installed once with `bash ~/projects/own_llm/CodeForge-250M_win/scripts/install_phone_commands.sh` from native Termux; this manages `codeforge`, `omp`, and `cf-check` in Termux's normal command path. The phone does not need torch, deepspeed, transformers, datasets, training tokenizer builds or GPU packages.
 
 ## Phone operations (after installation)
 
-Run `codeforge` from native Termux to enter the project in Debian with the controller virtual environment on `PATH`. Run the following from `~/projects/own_llm/CodeForge-250M_win`. Report paths must be fresh, and parent directories must exist. `scripts/phone_shell.sh` refuses an inherited training-approval flag; `scripts/setup_phone.sh` likewise refuses one and never submits a job.
+Run these separately from native Termux's `$` prompt, including from its home directory. Do not type them into OMP's message editor.
 
-For direct use, open Termux and run `tmux attach -t codeforge` to enter the prepared Debian project shell. If Android has killed that session, use `tmux new -s codeforge codeforge` instead. `codeforge` alone also enters Debian. Google Antigravity is authenticated and has passed a live `google-antigravity/gemini-3.8-flash` request; start it with `omp --model google-antigravity/gemini-3.8-flash --continue`. Check private `~/codeforge-storage/logs/provider-verification.json` before using an authorization marked for revocation or re-login. No command here launches training.
+| Command | Purpose |
+|---|---|
+| `omp` | Open the CodeForge project with the verified Antigravity account and continue the conversation |
+| `cf-check` | Run live controller/provider/cloud checks and save a private report |
+| `codeforge` | Optional advanced Debian project shell |
+
+The native `omp` launcher selects `google-antigravity/gemini-3.8-flash` for a bare invocation; supplied arguments/subcommands are forwarded unchanged. Examples such as `omp --version`, `omp models google-antigravity`, and `omp login openai-codex` work without manually entering Debian. Do not use Codex while its private security gate still requires revocation/re-login.
+
+For persistent work, `tmux attach -t codeforge` reconnects to the prepared project shell. If Android killed that session, `tmux new -s codeforge codeforge` recreates it. Neither command launches training.
 
 If USB assistance is needed after Termux restarts, run `sshd -f ~/.ssh/codeforge_sshd_config` in native Termux, then recreate the PC forwarding rule above. Do not expose SSH to Wi-Fi just to restore a USB connection.
 
-```sh
-python scripts/phone_control.py status --report "$HOME/codeforge-storage/logs/phone-status-$(date -u +%Y%m%dT%H%M%SZ).json"
-python scripts/phone_control.py drive-probe --remote codeforge-drive:codeforge-storage --report "$HOME/codeforge-storage/logs/drive-probe-$(date -u +%Y%m%dT%H%M%SZ).json"
-```
-
-Successful HF metadata access from the phone proves only phone-side access, not Kaggle Secrets availability or checkpoint upload/readback from a training notebook. A required integration failure returns nonzero; retain the JSON evidence and do not reinterpret it as training readiness.
-
-`status` inspects existing jobs/authentication; it does not submit training or preparation. A listed rclone remote does not prove OAuth/cloud access. `drive-probe` is an explicit storage write/readback operation, not a training launch; retain its SHA-256 cloud readback result. Use a new report filename for later runs.
+The lower-level `status` and `drive-probe` subcommands remain available inside Debian for diagnostics. Phone-side HF/Drive access does not prove Kaggle notebook Secrets readiness.
 
 For a fresh local download of the existing pilot's saved outputs (not a new preparation):
 
@@ -105,16 +106,16 @@ Use `--checksum` with immutable copies: independently downloaded copies have dif
 
 ## Repeatable provider and service checks
 
-Run these from the Debian project shell, not inside the coding agent's message editor:
+From native Termux, run **`cf-check`**. No environment activation, project path, model selector or report filename is required.
 
-```sh
-gh api user --jq .login
-omp --no-session --no-tools --model google-antigravity/gemini-3.8-flash --max-time 90s -p 'Reply only AGY_OK.'
-python scripts/phone_control.py status
-python scripts/phone_control.py drive-probe --remote codeforge-drive:codeforge-storage --report "$HOME/codeforge-storage/logs/drive-check-$(date -u +%Y%m%dT%H%M%SZ).json"
-```
+It checks installed controller tools, GitHub identity, live owner Kaggle/quota/notebook status, private HF access and a tiny upload/immutable-readback/delete, a Drive upload/download/SHA-256/delete, and a real no-tool Antigravity response. It never submits notebooks or launches model training.
 
-Expected: GitHub identity `Yash1bajpai`, an actual `AGY_OK` model response, required status checks successful, and Drive `cloud_readback_verified: true` plus `own_object_removed: true`. A model catalog listing or cached credential's existence is not proof that the provider accepts it.
+- `PASS`: that check completed successfully.
+- `FAIL`: a tool, authentication or cloud operation failed.
+- `ACTION ... openai_codex`: outstanding owner-side security recovery blocks Codex; the checker makes no Codex request while blocked.
+- `Overall: ATTENTION REQUIRED`: at least one required check failed or needs action. Exit status is nonzero; this is not hidden by otherwise passing services.
+
+The output names the mode-600 JSON report under `~/codeforge-storage/logs/cf-check-<unique>.json`. Share the concise PASS/FAIL/ACTION rows when diagnosing a problem, never a credential export. `training readiness NOT established` deliberately distinguishes a working phone controller from the separate production/training gates.
 
 After any credential exposure, have the account owner revoke the affected provider authorization through its security controls before signing in again. Local credential deletion or a new login alone does not prove the old authorization was revoked. For a fresh Codex login, use `omp login openai-codex`; only after revocation/re-login, test `omp --no-session --no-tools --model openai-codex/gpt-6.1-sol --max-time 90s -p 'Reply only CODEX_OK.'`. Never run or paste raw `omp auth export` output as a status check: it contains live credentials.
 
