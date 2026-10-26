@@ -28,8 +28,9 @@ data:
   dataset_name: codeforge-fresh-foundation
   seq_length: 2048
   target_tokens: 8500000000
-  languages: [starcoder-python, codeparrot-clean, fineweb-edu]
+  languages: [github-code, codeparrot-clean, fineweb-edu]
   language_weights: [0.70, 0.15, 0.15]
+  preparation_recipe: configs/fresh_data_production.yaml
 training:
   batch_size_per_device: 4
   gradient_accumulation_steps: 64

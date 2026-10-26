@@ -98,8 +98,8 @@ def backup(kernel, version, destination):
     )
     outputs = []
     status = str(api.kernels_status(kernel).status).split(".")[-1]
-    if status != "COMPLETE":
-        raise ValueError("Only completed saved notebook outputs can be backed up")
+    if status not in ("COMPLETE", "ERROR"):
+        raise ValueError("Only saved COMPLETE/ERROR outputs can be backed up; active notebooks are refused")
     with api.build_kaggle_client() as client:
         identity = ApiGetKernelRequest()
         identity.user_name, identity.kernel_slug = OWNER, parts[1]
@@ -130,7 +130,7 @@ def backup(kernel, version, destination):
         record = download_verified(url, target)
         records.append({"path": name, **record})
         print(f"Verified {name}: {record['bytes']} bytes", flush=True)
-    report = {"owner": OWNER, "kernel": kernel, "version": version,
+    report = {"owner": OWNER, "kernel": kernel, "version": version, "source_status": status,
               "created_at_utc": datetime.now(timezone.utc).isoformat(),
               "verification": "http-length-and-local-sha256-readback",
               "cloud_sync_verified": False, "files": records}

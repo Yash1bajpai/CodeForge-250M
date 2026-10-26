@@ -90,18 +90,19 @@ class BackupTests(unittest.TestCase):
                 list_kernel_session_output=lambda request: SimpleNamespace(files=items, next_page_token=""),
             )
             client = SimpleNamespace(kernels=SimpleNamespace(kernels_api_client=service))
-            api = SimpleNamespace(
-                kernels_status=lambda kernel: SimpleNamespace(status="COMPLETE"),
-                build_kaggle_client=lambda: nullcontext(client),
-            )
-            with tempfile.TemporaryDirectory() as directory:
-                destination = Path(directory) / "backup"
-                with patch("scripts.kaggle_drive_backup.owner_api", return_value=api):
-                    report = backup("yashbajpai2027/job", 1, destination)
-                self.assertEqual((destination / "train/manifest.json").read_bytes(), b"/train")
-                self.assertEqual((destination / "validation/manifest.json").read_bytes(), b"/validation")
-                self.assertEqual({item["path"] for item in report["files"]},
-                                 {"train/manifest.json", "validation/manifest.json"})
+            for source_status in ("COMPLETE", "ERROR"):
+                api = SimpleNamespace(
+                    kernels_status=lambda kernel: SimpleNamespace(status=source_status),
+                    build_kaggle_client=lambda: nullcontext(client),
+                )
+                with self.subTest(source_status=source_status), tempfile.TemporaryDirectory() as directory:
+                    destination = Path(directory) / "backup"
+                    with patch("scripts.kaggle_drive_backup.owner_api", return_value=api):
+                        report = backup("yashbajpai2027/job", 1, destination)
+                    self.assertEqual((destination / "train/manifest.json").read_bytes(), b"/train")
+                    self.assertEqual((destination / "validation/manifest.json").read_bytes(), b"/validation")
+                    self.assertEqual({item["path"] for item in report["files"]},
+                                     {"train/manifest.json", "validation/manifest.json"})
         finally:
             server.shutdown()
             server.server_close()

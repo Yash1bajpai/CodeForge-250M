@@ -5,6 +5,8 @@
 
 CodeForge-250M is a roughly 246M-parameter decoder-only code model trained from scratch. The goal is to support code completion, FIM editing and tool calling for nexus-agent and Vision. Those are development goals, not validated capabilities of the current checkpoint.
 
+**Full project plan and another-PC handoff:** [`CODEFORGE_PLAN.md`](CODEFORGE_PLAN.md).
+
 ## Current state
 
 - Stage A is complete at step **2,898**, covering approximately **1.52B tokens in the intended single-pass schedule**. This is not a claim that every token is unique or that the run was free of legacy training defects.
@@ -66,7 +68,7 @@ source-bundle identity, 32k/11-token vocabulary and disjoint exact document hash
 On October 26, 2026, the phone independently recovered these outputs and verified
 the Drive copies by downloading them: **24 matching files, zero differences**.
 
-For a separately authorized future private, owner-only **CPU** build, use a new report filename. **Do not run this during phone migration: another preparation launch is not authorized.**
+The historical pilot launcher below remains available for an explicitly requested pilot. The current authorized production preparation uses the Kaggle-only recipe described next.
 
 ```powershell
 python scripts/push_cpu_prep.py --report "G:\My Drive\codeforge-storage\logs\fresh-pilot-launch-new.json"
@@ -85,6 +87,162 @@ provides no CLI support for configuring Secrets. The CPU readiness check reached
 public Hugging Face with HTTP 200 but failed in Kaggle's secret backend
 (`ConnectionError`); it did not authenticate or verify checkpoint writes from
 Kaggle. This is still a pre-training blocker, not a successful credential gate.
+
+## Kaggle-only production preparation (October 26, 2026)
+
+The PC is a controller only. Dataset processing, tokenizer fitting, tokenization,
+packing, training and evaluation run on Kaggle. CPU preparation is authorized;
+model training is not. The phone setup is preserved but is not the active workflow.
+
+The immutable source revisions and license allowlists are in
+[`configs/fresh_data_production.yaml`](configs/fresh_data_production.yaml).
+The foundation recipe replaces gated StarCoder data with public multilingual
+GitHub code; `configs/config_250M_fresh.yaml` records the same source names.
+
+| Source/subset | Stage | Training-input allocation |
+|---|---|---:|
+| [CodeParrot GitHub code](https://huggingface.co/datasets/codeparrot/github-code) | Foundation | 5.950B |
+| [CodeParrot clean Python](https://huggingface.co/datasets/codeparrot/codeparrot-clean-train) | Foundation | 1.275B |
+| [FineWeb-Edu 10BT sample](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | Foundation | 1.275B |
+| [OpenCoder diverse instructions](https://huggingface.co/datasets/OpenCoder-LLM/opc-sft-stage1) | Code instruction | 0.800B |
+| OpenCoder real-user instructions | Code instruction | 0.200B |
+| [Glaive function calling v2](https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2) | Tool instruction | 0.300B |
+| [Hermes function calling](https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1) | Tool instruction | 0.200B |
+
+**These are allocations, not available unique-data counts.** In particular,
+Glaive/Hermes together contain only about 320MB of source JSON. They cannot
+establish 0.5B unique tool tokens. Preparation does not repeat data to fill a
+shortfall. Measured retained counts must determine a later training schedule;
+more verified execution/Nexus/Vision examples remain a capability requirement.
+Public function-call traces are not proof that our model can execute or test code.
+
+Code records require approved per-record repository-license labels; unknown and
+copyleft labels are excluded. FineWeb-Edu uses its declared ODC-BY license,
+OpenCoder MIT, Glaive/Hermes Apache-2.0. Attribution/provenance is retained with
+every admitted document. These producer labels are not an independent per-file
+license or privacy audit.
+
+The production engine freezes one 32K byte-level BPE tokenizer from an 80M-character
+train-only sample: 56M multilingual code, 12M clean Python, 12M educational prose.
+Validation repositories are held out before fitting; validation documents matching
+tokenizer-sample exact hashes or sampled repeated blocks are rejected.
+It uses disk-backed global normalized-exact deduplication plus eight sampled
+256-word repeated blocks per long document. This conservative filter is not
+exhaustive near-deduplication. Pinned HumanEval/MBPP lexical-window exclusion
+continues to apply; complete benchmark decontamination is not claimed.
+
+Code-only FIM is deterministic. Chat/tool data is never FIM-transformed.
+Instruction conversations exceeding 2,048 tokens are counted and rejected,
+not silently truncated. Shards include `uint16` IDs, real-length sidecars and
+assistant-only loss masks. User, system, tool-result and padding tokens are not
+supervised instruction targets. Actual input, valid, padding, discarded and
+supervised-target counts are separate; a whole-document budget overshoot is
+bounded by the configured document-size cap.
+
+From the PC, submit a private CPU session with a new report filename:
+
+```powershell
+python scripts/push_cpu_prep.py --config configs/fresh_data_production.yaml --report ../.watch/fresh-production-launch-new.json
+```
+
+`--verify-only` runs the contract suite and live source-format preflight on
+Kaggle. `--tests-only` isolates the contract suite without corpus downloads,
+tokenizer fitting, preparation or the notebook-secret probe. Normal sessions
+run the suite and source preflight before preparing data, then stop cleanly
+at four hours, roughly 100M input tokens, or the disk-space floor.
+`--session-max-tokens` can reduce a first window without changing the pinned
+recipe/checkpoint identity. These are bounded windows, not a single notebook
+claiming to prepare all 10B tokens. No GPU/TPU or model-training process is launched.
+
+The original source-schema-corrected submission,
+[`codeforge-fresh-cpu-prep-534125d9`](https://www.kaggle.com/code/yashbajpai2027/codeforge-fresh-cpu-prep-534125d9),
+prepared a bounded 5M-input window but ended ERROR after its completed engine
+failed to exit and hit the outer 15,500-second timeout. Its tokenizer and all ten
+windows were separately audited on Kaggle; its old-format state/shards remain
+unpromoted. All 93 saved files were preserved with verified download/readback.
+The two earlier submissions were superseded and deleted after discovering the
+raw GitHub parquet schema: `content`/`path`, with language derived from extension,
+rather than the old dataset loader's advertised `code`/`language` output columns.
+
+The PC execution-refusal guard was exercised before output creation. Kaggle CPU
+regression run [`codeforge-fresh-cpu-prep-5eb73756`](https://www.kaggle.com/code/yashbajpai2027/codeforge-fresh-cpu-prep-5eb73756)
+passed **71 tests in 11.752 seconds**, after six failing-before regressions were
+recorded and fixed. These cover space-separated Glaive turns, complete parallel
+tool results, assistant-final conversations, interrupted checkpoint recovery,
+pipeline identity and interrupted tokenizer publication without refitting.
+The live preflight [`codeforge-fresh-cpu-prep-ca3166c4`](https://www.kaggle.com/code/yashbajpai2027/codeforge-fresh-cpu-prep-ca3166c4)
+also passed 71 tests and admitted an example from each of the seven pinned
+sources. Downloaded reports matched the submitted source snapshot.
+Those earlier checks did not prove real-source process shutdown. A bounded
+diagnostic reproduced HF range I/O surviving main return. The fix disables
+Parquet background prebuffering and explicitly closes source iterators, sampling
+resources and session streams before publishing completion; cleanup errors do
+not replace an existing processing error.
+
+Corrected [`codeforge-recovered-cpu-prep-2d372b23/1`](https://www.kaggle.com/code/yashbajpai2027/codeforge-recovered-cpu-prep-2d372b23)
+is COMPLETE: **76 tests passed in 14.882s**, all seven live-source preflights
+passed, the original frozen tokenizer was adopted unchanged, and real
+preparation produced 5,045,576 non-padding input IDs. The actual CLI subprocess
+exited normally and the outer worker finished; no timeout was suppressed.
+These are prepared train-plus-validation IDs, not completed training tokens.
+See `CODEFORGE_PLAN.md` for the real-resume/backup result and current notebook.
+
+The real resume `codeforge-fresh-cpu-prep-d4d37022/1` also completed normally
+with 76 tests passing. A separate Kaggle audit verified 20 windows, 8,330 distinct
+normalized documents, **10,065,678 train input IDs + 101,480 validation IDs**,
+unchanged tokenizer/cursors/dedup and four exact byte/control round trips.
+The complete 184-file chain was separately backed up to private dataset
+`yashbajpai2027/codeforge-fresh-prepared-w20-20261026/1`; another notebook read
+back every length/SHA-256. Mounted Drive copies also match, but Drive cloud sync
+is unverified; its browser requires sign-in and no login was attempted.
+
+Next CPU preparation `codeforge-fresh-cpu-prep-fe52fd65/1` is RUNNING with a
+100M additional-input-token cap, resuming the completed `d4d37022/1` state.
+Its additional counts are not yet verified. This is data preparation, not
+GPU/model training, and it does not prove the complete 10B corpus is available.
+
+Each committed window has attributed JSONL, hashed shards and an independently
+read-back manifest. Checkpoint format v2 commits state, duplicate indexes,
+source cursors and recovery metadata in one SQLite transaction. It validates
+recipe, preparation-code, Python/package and frozen-tokenizer identities;
+recovers missing/stale receipts and hot journals; and preserves the last
+committed window on exceptions while rethrowing the original failure.
+
+Resume a completed saved output using
+`--resume-kernel yashbajpai2027/<completed-preparation-notebook>` plus the same
+config and a fresh report path. The launcher attaches its exact saved version
+and pins its Kaggle runtime image. Only the checkpoint database/tokenizer is
+copied; earlier windows remain in their parent notebook outputs. The parent
+receipt records the notebook version and checkpoint/manifest hashes.
+Back up all parent windows, not only the newest one.
+
+A separate-notebook synthetic fixture passed:
+`codeforge-cpu-resume-smoke-655fde13/1` → `codeforge-cpu-resume-smoke-1dd18381/1`.
+The tokenizer stayed unchanged, the cursor advanced from row 2 to 4, one
+duplicate was skipped and the accepted-document total advanced from 2 to 3.
+Both output sets were downloaded and checksum/readback verified, then copied
+and read back on the mounted Drive. Independent cloud sync is not verified.
+This is fixture/provider proof, not production-data resume or token counts.
+
+Kaggle rejects ERROR notebooks as direct inputs; the controller refuses these
+before submission. The verified original output was published as the private
+recovery dataset `yashbajpai2027/codeforge-prep-recovery-534125d9-20261026/1`.
+`kaggle_drive_backup.py` now preserves saved COMPLETE or ERROR output sets while
+still refusing active notebooks; this does not make ERROR notebooks attachable.
+
+For this explicit recovery, `--tokenizer-dataset <owner/slug/version>` verifies
+the sample/recipe hashes, 32K vocabulary, special tokens, byte alphabet and frozen
+tokenizer identity on Kaggle, then imports only tokenizer/sample files into
+fresh v2 state. It is mutually exclusive with resume and diagnostic modes.
+Old SQLite state, cursors, windows and token totals are never imported.
+The recovered candidate identity is `3b06dbefb2abaa646568722ef799ad20ad2c7e4ba2f195583cb29e1a52b0532e`.
+Use `--resume-kernel` for subsequent windows, not another adoption or BPE fit.
+
+Kaggle saved outputs are the immediate persistence boundary. This launcher does
+not automatically upload production outputs to Drive or Hugging Face. Existing
+verified backup commands remain separate; do not claim cloud readback before it
+has happened. The Kaggle `HF_TOKEN` checkpoint-write gate and SFT loss-mask loader
+verification remain required before model training.
 
 
 ## Stage A benchmark results

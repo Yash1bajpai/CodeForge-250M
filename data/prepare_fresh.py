@@ -50,9 +50,15 @@ def stream_file(spec, filename):
     from datasets import load_dataset
     from huggingface_hub import hf_hub_url
     url = hf_hub_url(spec["repo"], filename, repo_type="dataset", revision=spec["revision"])
+    options = {}
+    if spec.get("loader", "parquet") == "parquet":
+        from pyarrow.dataset import ParquetFragmentScanOptions
+        # A bounded consumer may stop within a row group. Do not leave native
+        # Arrow workers reading Python-backed HF files during interpreter exit.
+        options["fragment_scan_options"] = ParquetFragmentScanOptions(pre_buffer=False)
     # Built-in JSON/Parquet readers only: never execute a remote dataset script.
     return load_dataset(spec.get("loader", "parquet"), data_files={"train": [url]},
-                        split="train", streaming=True, token=False)
+                        split="train", streaming=True, token=False, **options)
 
 
 def lexical_windows(text, width, minimum_distinct):

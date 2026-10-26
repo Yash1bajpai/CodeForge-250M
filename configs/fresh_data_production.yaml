@@ -1,0 +1,106 @@
+run_id: fresh-20261026-production01
+purpose: data-preparation-only
+execution_host: kaggle
+seed: 42
+vocab_size: 32000
+seq_length: 2048
+validation_fraction: 0.01
+max_document_chars: 200000
+tokenizer_sample_chars: 80000000
+# CPU sessions end well before Kaggle's 12-hour hard limit.
+session_seconds: 14400
+session_max_tokens: 100000000
+shard_sequences: 1000
+checkpoint_documents: 500
+min_free_bytes: 3000000000
+# Targets are future TRAINING allocations, not available unique-data claims.
+# No source is repeated automatically to hide a unique-data shortfall.
+sources:
+  - name: github-code
+    stage: foundation
+    repo: codeparrot/github-code
+    revision: b5661e6b17396364b2bcf8e68977b0d28e1ebd19
+    file_pattern: data/*.parquet
+    loader: parquet
+    text_field: content
+    license_field: license
+    allowed_licenses: [mit, apache-2.0, bsd-2-clause, bsd-3-clause, isc, cc0-1.0, unlicense]
+    language_field: language
+    language_from_path: true
+    allowed_languages: [Python, JavaScript, TypeScript, Shell, PowerShell, C, C++, GO, Rust, Java, C#, SQL, HTML, CSS, Dockerfile, Markdown]
+    python_ast: true
+    fim_rate: 0.5
+    fim_languages: [Python, JavaScript, TypeScript, Shell, PowerShell, C, C++, GO, Rust, Java, C#, SQL, HTML, CSS, Dockerfile]
+    target_tokens: 5950000000
+    tokenizer_chars: 56000000
+  - name: codeparrot-clean
+    stage: foundation
+    repo: codeparrot/codeparrot-clean-train
+    revision: 3e6ab65f2864931e041f6a82db9b5a6ec2b71ab4
+    file_pattern: file-*.json.gz
+    loader: json
+    text_field: content
+    license_field: license
+    allowed_licenses: [mit, apache-2.0, bsd-2-clause, bsd-3-clause, isc]
+    python_ast: true
+    fim_rate: 0.5
+    target_tokens: 1275000000
+    tokenizer_chars: 12000000
+  - name: fineweb-edu
+    stage: foundation
+    repo: HuggingFaceFW/fineweb-edu
+    revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+    file_pattern: sample/10BT/*.parquet
+    loader: parquet
+    text_field: text
+    allowed_licenses: [odc-by]
+    target_tokens: 1275000000
+    tokenizer_chars: 12000000
+  - name: opencoder-diverse
+    stage: code_instruction
+    repo: OpenCoder-LLM/opc-sft-stage1
+    revision: 1bcab575f5e2d1c1fd6652720418524c27b3d58b
+    file_pattern: data/largescale_diverse_instruct-*.parquet
+    loader: parquet
+    format: opencoder
+    allowed_licenses: [mit]
+    target_tokens: 800000000
+  - name: opencoder-realuser
+    stage: code_instruction
+    repo: OpenCoder-LLM/opc-sft-stage1
+    revision: 1bcab575f5e2d1c1fd6652720418524c27b3d58b
+    file_pattern: data/realuser_instruct-*.parquet
+    loader: parquet
+    format: opencoder
+    allowed_licenses: [mit]
+    target_tokens: 200000000
+  - name: glaive-tools
+    stage: tool_instruction
+    repo: glaiveai/glaive-function-calling-v2
+    revision: e7f4b6456019f5d8bcb991ef0dd67d8ff23221ac
+    file_pattern: glaive-function-calling-v2.json
+    loader: json
+    format: glaive
+    allowed_licenses: [apache-2.0]
+    target_tokens: 300000000
+  - name: hermes-tools
+    stage: tool_instruction
+    repo: NousResearch/hermes-function-calling-v1
+    revision: dae3e1d28cfbcf4b915c04ea1e072030529b4bda
+    file_pattern: func-calling*.json
+    loader: json
+    format: hermes
+    allowed_licenses: [apache-2.0]
+    target_tokens: 200000000
+benchmark_exclusion:
+  window_tokens: 32
+  minimum_distinct_tokens: 12
+  sources:
+    - repo: openai/openai_humaneval
+      revision: 7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544
+      file_pattern: openai_humaneval/*.parquet
+      fields: [prompt, canonical_solution, test]
+    - repo: google-research-datasets/mbpp
+      revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c
+      file_pattern: full/*.parquet
+      fields: [text, code, test_list, challenge_test_list]
