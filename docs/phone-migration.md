@@ -69,7 +69,7 @@ Use `scripts/setup_phone.sh` inside Debian to install controller tools and `scri
 
 Run `codeforge` from native Termux to enter the project in Debian with the controller virtual environment on `PATH`. Run the following from `~/projects/own_llm/CodeForge-250M_win`. Report paths must be fresh, and parent directories must exist. `scripts/phone_shell.sh` refuses an inherited training-approval flag; `scripts/setup_phone.sh` likewise refuses one and never submits a job.
 
-For direct use, open Termux and run `tmux attach -t codeforge` to enter the prepared Debian project shell. If Android has killed that session, use `tmux new -s codeforge codeforge` instead. `codeforge` alone also enters Debian. Start the coding agent with `omp --model openai-codex/gpt-6.1-sol --continue`; the archived original conversation remains available for explicit resume if required. No command here launches training.
+For direct use, open Termux and run `tmux attach -t codeforge` to enter the prepared Debian project shell. If Android has killed that session, use `tmux new -s codeforge codeforge` instead. `codeforge` alone also enters Debian. Google Antigravity is authenticated and has passed a live `google-antigravity/gemini-3.8-flash` request; start it with `omp --model google-antigravity/gemini-3.8-flash --continue`. Check private `~/codeforge-storage/logs/provider-verification.json` before using an authorization marked for revocation or re-login. No command here launches training.
 
 If USB assistance is needed after Termux restarts, run `sshd -f ~/.ssh/codeforge_sshd_config` in native Termux, then recreate the PC forwarding rule above. Do not expose SSH to Wi-Fi just to restore a USB connection.
 
@@ -102,6 +102,23 @@ Never use `rclone sync`. `--immutable` refuses changed existing files instead of
 `backup-manifest.json` is a per-download local audit record with its own timestamp; it is excluded so a second verified download does not conflict with the original backup's audit record. Keep each local manifest and store cloud verification evidence separately under `logs/`.
 
 Use `--checksum` with immutable copies: independently downloaded copies have different local modification times even when their contents are identical. Content mismatches must still fail; do not force an overwrite to fix a timestamp mismatch.
+
+## Repeatable provider and service checks
+
+Run these from the Debian project shell, not inside the coding agent's message editor:
+
+```sh
+gh api user --jq .login
+omp --no-session --no-tools --model google-antigravity/gemini-3.8-flash --max-time 90s -p 'Reply only AGY_OK.'
+python scripts/phone_control.py status
+python scripts/phone_control.py drive-probe --remote codeforge-drive:codeforge-storage --report "$HOME/codeforge-storage/logs/drive-check-$(date -u +%Y%m%dT%H%M%SZ).json"
+```
+
+Expected: GitHub identity `Yash1bajpai`, an actual `AGY_OK` model response, required status checks successful, and Drive `cloud_readback_verified: true` plus `own_object_removed: true`. A model catalog listing or cached credential's existence is not proof that the provider accepts it.
+
+After any credential exposure, have the account owner revoke the affected provider authorization through its security controls before signing in again. Local credential deletion or a new login alone does not prove the old authorization was revoked. For a fresh Codex login, use `omp login openai-codex`; only after revocation/re-login, test `omp --no-session --no-tools --model openai-codex/gpt-6.1-sol --max-time 90s -p 'Reply only CODEX_OK.'`. Never run or paste raw `omp auth export` output as a status check: it contains live credentials.
+
+These checks establish current access, not permanent availability. Provider grants can expire or be revoked, quotas can run out, networks can fail, and Android can terminate Termux. Keep private evidence under `~/codeforge-storage/logs/`; model-training readiness still requires the separate production gates below.
 
 ## Long-running controller sessions
 
