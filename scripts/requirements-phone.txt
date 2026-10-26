@@ -1,0 +1,7 @@
+# Phone controller clients only; no model/data/training dependencies.
+# Install with normal dependency resolution inside the phone's Debian runtime:
+# python -m pip install -r scripts/requirements-phone.txt
+# Native Android wheels are not required; no ML extras are installed.
+kaggle==2.2.2
+kagglesdk==0.1.30
+huggingface-hub==1.24.0

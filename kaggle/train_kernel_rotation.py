@@ -1,28 +1,23 @@
 #!/usr/bin/env python
-# Kaggle GPU kernel (ROTATION v1): trains CodeForge-250M run #2 on ANY account.
-# Difference from train_kernel.py: the checkpoint flows through HuggingFace Hub
-# (Yash1bajpai/CodeForge-250M-rotation) instead of account-local Kaggle
-# datasets, so account B/C kernels resume the exact state account A pushed.
-# The training data still mounts from the owner's Kaggle dataset (read-only
-# attach — friend accounts can mount other users' public... they CAN'T; so
-# data is pulled from HF at boot when not mounted).
-# HF_TOKEN is injected via kernel push metadata (a Kaggle "secret" variable
-# placeholder that the pusher replaces locally before pushing — the token
-# never appears in any repo or log).
+# Owner-only Kaggle kernel. Checkpoints flow through Hugging Face Hub.
+# The local watchdog permits only yashbajpai2027 and mounts its data dataset.
+# Enable the HF_TOKEN Kaggle Secret for this notebook before running it.
 import os, sys, subprocess, shutil, glob, time, json
 
 CF = "/kaggle/working/CodeForge-250M"
 HF_REPO = "Yash1bajpai/CodeForge-250M-rotation"
 DATA_MOUNT = "/kaggle/input/codeforge-data"
-# --- the pusher replaces this line with the real token at push time ---
-HF_TOKEN = "__HF_TOKEN_PLACEHOLDER__"
+from kaggle_secrets import UserSecretsClient
+HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
+if not HF_TOKEN:
+    raise SystemExit("FATAL: enable the HF_TOKEN Kaggle Secret for this notebook")
 
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_TOKEN"] = HF_TOKEN
 
-print("=== [Kernel] boot (rotation v1) ===", flush=True)
+print("=== [Kernel] boot (owner-only) ===", flush=True)
 subprocess.run(["pip", "install", "-q", "huggingface_hub"], check=False)
 
 def sh(cmd, **kw):

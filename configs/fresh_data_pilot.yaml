@@ -1,0 +1,41 @@
+run_id: fresh-20261025-pilot01
+purpose: data-preparation-only
+seed: 42
+vocab_size: 32000
+seq_length: 2048
+validation_fraction: 0.02
+max_document_chars: 200000
+min_train_sequences: 512
+min_validation_sequences: 8
+# Raw character caps bound CPU work; packed manifests measure actual tokens.
+# This two-source pilot does not establish the production 10B source mixture.
+sources:
+  - name: codeparrot-clean
+    repo: codeparrot/codeparrot-clean-train
+    revision: 3e6ab65f2864931e041f6a82db9b5a6ec2b71ab4
+    file_pattern: file-*.json.gz
+    loader: json
+    text_field: content
+    max_chars: 27200000
+    license_field: license
+    allowed_licenses: [mit, apache-2.0, bsd-2-clause, bsd-3-clause, isc]
+  - name: fineweb-edu
+    repo: HuggingFaceFW/fineweb-edu
+    revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+    file_pattern: sample/10BT/*.parquet
+    loader: parquet
+    text_field: text
+    max_chars: 4800000
+    allowed_licenses: [odc-by]
+benchmark_exclusion:
+  window_tokens: 32
+  minimum_distinct_tokens: 12
+  sources:
+    - repo: openai/openai_humaneval
+      revision: 7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544
+      file_pattern: openai_humaneval/*.parquet
+      fields: [prompt, canonical_solution, test]
+    - repo: google-research-datasets/mbpp
+      revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c
+      file_pattern: full/*.parquet
+      fields: [text, code, test_list, challenge_test_list]

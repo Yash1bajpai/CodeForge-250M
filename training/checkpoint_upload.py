@@ -5,8 +5,9 @@ from pathlib import PurePosixPath
 class SafeCheckpointUploader:
     def __init__(self, api, repo_id, prefix):
         p = PurePosixPath(prefix)
-        if len(p.parts) != 1 or not prefix.startswith('stageA3') or prefix in ('.', '..'):
-            raise ValueError('Upload prefix must be a new stageA3-prefixed folder')
+        if (len(p.parts) != 1 or "\\" in prefix
+                or not prefix.startswith(('stageA3', 'fresh-')) or prefix in ('.', '..')):
+            raise ValueError('Upload prefix must be a new stageA3- or fresh-prefixed folder')
         self.api, self.repo_id, self.prefix = api, repo_id, prefix
         files = api.list_repo_files(repo_id=repo_id)
         if any(f.startswith(prefix + '/') and ('checkpoint' in f) for f in files):

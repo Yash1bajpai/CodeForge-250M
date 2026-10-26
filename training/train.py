@@ -160,6 +160,12 @@ def train():
     parser.add_argument("--init_from", type=str, default=None, help="Warm start: load MODEL WEIGHTS ONLY from this checkpoint (step 0, fresh optimizer/schedule/data cursor). Never overwrites the source file.")
     parser.add_argument("--legacy-migration", type=str, help="Audited JSON identity/counter record for one legacy checkpoint")
     args = parser.parse_args()
+    with open(args.config, "r", encoding="utf-8") as f:
+        full_cfg = yaml.safe_load(f)
+    cfg = full_cfg["model"]
+    train_cfg = full_cfg["training"]
+    if train_cfg.get("require_explicit_approval") and os.environ.get("CF_TRAINING_APPROVED") != "1":
+        raise SystemExit("Training is blocked: notify the owner before launch, then explicitly set CF_TRAINING_APPROVED=1.")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and os.environ.get("CF_ALLOW_DDP") != "1":
         raise SystemExit("This audited Stage A resume supports only one GPU (set CF_ALLOW_DDP=1 for the fresh-start DDP trial; --resume is not supported under DDP).")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.resume or args.legacy_migration):
@@ -194,11 +200,12 @@ def train():
     cap = torch.cuda.get_device_capability(0)
     dtype = torch.float16 if cap[0] < 8 else torch.bfloat16
     print(f"--> Hardware: {torch.cuda.get_device_name(0)} | dtype={dtype} | world={ddp_world}")
+    if "seed" in full_cfg.get("run", {}):
+        seed = int(full_cfg["run"]["seed"])
+        random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
-    with open(args.config, "r", encoding="utf-8") as f:
-        full_cfg = yaml.safe_load(f)
-        cfg = full_cfg["model"]
-        train_cfg = full_cfg["training"]
 
     metrics_path = os.path.join(PROJECT_ROOT, "metrics.json")
     ckpt_dir = os.path.join(PROJECT_ROOT, full_cfg.get("checkpointing", {}).get("output_dir", "checkpoints/CodeForge-250M"))

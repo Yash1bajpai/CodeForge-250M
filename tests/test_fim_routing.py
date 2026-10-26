@@ -6,7 +6,7 @@ try:
     import torch  # noqa
     import transformers  # noqa
 except ImportError:  # CPU-only CI without the ML stack: stub just what the module imports
-    t = types.ModuleType("torch"); t.save = lambda *a, **k: None; t.tensor = lambda *a, **k: None; t.uint16 = None
+    t = types.ModuleType("torch"); t.save = lambda *a, **k: None; t.tensor = lambda *a, **k: None; t.uint16 = None; t.int32 = None
     tr = types.ModuleType("transformers"); tr.PreTrainedTokenizerFast = object
     sys.modules.setdefault("torch", t); sys.modules.setdefault("transformers", tr)
 import data.tokenize_dataset as td
@@ -28,13 +28,14 @@ class FimRoutingTests(unittest.TestCase):
         self.assertEqual(td.apply_fim_transformation(doc, fim_rate=1.0), doc)
 
     def test_code_gets_fim_at_rate_one(self):
-        random.seed(0)
-        out = td.apply_fim_transformation(CODE, fim_rate=1.0)
+        out = td.apply_fim_transformation(CODE, fim_rate=1.0, rng=random.Random(0))
         self.assertTrue(out.startswith("<|fim_prefix|>") and "<|fim_middle|>" in out)
 
     def test_build_dataset_routes_by_source(self):
         class Tok:
             eos_token_id = 0
+            def get_vocab(self):
+                return {"eos": 0, "fim": 1, "doc": 2}
             def encode(self, text):
                 # one id per FIM token present, else one id for the doc
                 return [1] * sum(text.count(t) for t in td.FIM_TOKENS) + [2]
@@ -47,9 +48,9 @@ class FimRoutingTests(unittest.TestCase):
                     for _ in range(40): f.write(json.dumps({"text": CODE}) + "\n")
             seen = {}
             real = td.apply_fim_transformation
-            def spy(code, fim_rate=0.5):
+            def spy(code, fim_rate=0.5, rng=None):
                 seen["n"] = seen.get("n", 0) + 1
-                return real(code, fim_rate=1.0)
+                return real(code, fim_rate=1.0, rng=rng)
             with mock.patch.object(td, "PreTrainedTokenizerFast", Tok), \
                  mock.patch.object(td, "apply_fim_transformation", spy), \
                  mock.patch.object(td.torch, "save"):
