@@ -22,10 +22,11 @@ CodeForge-250M is a roughly 246M-parameter decoder-only code model trained from 
 run. The target budget is 10B non-padding input tokens: 8.5B foundation, 1B
 code-instruction and 0.5B tool-instruction. These are staged planning budgets, not
 claims of available unique data or model quality. The executable foundation
-schedule is 16,221 nominal updates at 256 sequences of 2,048 tokens; exact valid
-token accounting, instruction loss masking and the production data-window
-schedule must be checked before larger training. Existing checkpoints are not
-initialization sources and are not overwritten.
+schedule is 16,221 nominal updates at 256 sequences of 2,048 tokens. The trainer
+now has a foundation-only production-window consumer and cumulative real-input
+accounting, verified on tiny CPU fixtures only. Instruction loss masking and
+full-scale throughput remain gates. Existing checkpoints are not initialization
+sources and are not overwritten.
 
 **Model training is not authorized by data preparation.** The fresh config sets
 `require_explicit_approval: true`; the training entrypoint exits before CUDA
@@ -241,9 +242,62 @@ Use `--resume-kernel` for subsequent windows, not another adoption or BPE fit.
 Kaggle saved outputs are the immediate persistence boundary. This launcher does
 not automatically upload production outputs to Drive or Hugging Face. Existing
 verified backup commands remain separate; do not claim cloud readback before it
-has happened. The Kaggle `HF_TOKEN` checkpoint-write gate and SFT loss-mask loader
-verification remain required before model training.
+has happened. The Kaggle `HF_TOKEN` checkpoint-write gate remains required before
+model training; instruction stages additionally require an SFT loss-mask consumer.
 
+
+## Foundation production consumer
+
+`training/train.py` accepts `--production-root ROOT --stage foundation`, where
+ROOT is a preparation output containing `preparation-manifest.json`, or one
+committed window containing `manifest.json`. This does not authorize a training
+launch. Without `--production-root`, the legacy flat `data/tokenized/shard_*.pt`
+selection and deterministic holdout remain available.
+
+- Preparation roots select only pinned `owned_windows`; parent runs and
+  uncommitted/unlisted windows are never discovered automatically.
+- `train` and `val` use the producer's existing `train`/`validation` membership,
+  not a new holdout. Missing selected splits fail; `CF_VAL_DIR` cannot override
+  production splits.
+- `--tokenizer-dir DIR` defaults to ROOT/tokenizer for production. Supply it
+  explicitly for a standalone window. The consumer checks the aggregate frozen
+  tokenizer identity, manifest pins, provenance and payload checksums, tensor
+  layouts, vocabulary bounds, sidecars and token totals.
+- Foundation loss masks must supervise exactly the real causal targets.
+  `instruction`, `code_instruction` and `tool_instruction` stages refuse
+  explicitly; assistant-only SFT masking is not implemented.
+
+`data.target_tokens` (or explicit `--max-input-tokens N`) is a cumulative
+real-input-ID cap, independent of `max_steps`; production requires a cap.
+For `x = sequence[:-1]`, a row counts `min(valid_len, sequence_length - 1)`.
+This excludes padding but includes a padded row's last real input even when its
+next target is ignored. The sampler admits the longest fitting prefix of the
+unchanged sample order, never skips rows to fill a remainder and never
+overshoots. A remainder smaller than the next row is left unused. Metrics and
+the final report distinguish cumulative input IDs from session throughput.
+
+Checkpoint schema 2 stores `resume_state.input_tokens_seen`. Resume binds
+ordered train/validation membership, shard/length/mask hashes, window and
+preparation-manifest identities, tokenizer, model/training/data/run config,
+stage and token cap. It also checks the real-token counter against the saved
+cursor. Older checkpoints require an explicitly audited schema-2 migration;
+no cumulative count is guessed. Optimizer, GradScaler, RNG and single-pass
+cursor state remain preserved. Production and token-budget paths require one
+GPU; the legacy DDP trial is not a production resume path.
+
+The dataset audits shards sequentially, keeps compact per-row length metadata,
+and lazily caches one token shard per worker, not the full corpus. The existing
+global permutation can reload shards frequently; full-scale I/O throughput and
+memory remain unmeasured. No model architecture, hyperparameters, tokenizer or
+preparation recipe changed.
+
+Local synthetic CPU verification: 93 tests passed, 1 optional Kaggle-SDK test
+skipped, 93 subtests passed. The runnable subset excluded
+`test_data_quality.py`, `test_fresh_preparation.py` and
+`test_production_preparation.py` because their imports need unavailable
+`datasketch`/`tokenizers`/`transformers`. A separate manifest-to-DataLoader smoke
+counted 10 real IDs in 14 input slots under a strict 10-ID cap. This is not
+GPU, full-corpus, training-quality or cloud-readiness evidence.
 
 ## Stage A benchmark results
 

@@ -29,7 +29,7 @@ class ResumeSafetyTests(unittest.TestCase):
         self.assertEqual(optimizer_step_counts(o),7)
         c={'optimizer_state_dict':o}
         with self.assertRaisesRegex(ValueError,'Legacy'): validate_resume_metadata(c,'f',256)
-        c['resume_state']={'schema_version':1,'fingerprint':'f','seqs_per_step':256,'sample_cursor':1792,'completed_updates':7,'optimizer_step_count':7}
+        c['resume_state']={'schema_version':2,'fingerprint':'f','seqs_per_step':256,'sample_cursor':1792,'input_tokens_seen':12544,'completed_updates':7,'optimizer_step_count':7}
         self.assertEqual(validate_resume_metadata(c,'f',256)['sample_cursor'],1792)
         with self.assertRaises(ValueError): validate_resume_metadata(c,'wrong',256)
         o['state'][1]['step']=torch.tensor(8.)

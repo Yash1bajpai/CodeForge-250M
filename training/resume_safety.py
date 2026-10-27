@@ -29,15 +29,24 @@ def audit_shards(paths, seq_length, vocab_size, allow_partial=False):
             raise ValueError(f'Unequal shard rows: {Path(path).name}. Legacy permutation cannot be preserved.')
         if int(t.to(torch.int32).max()) >= vocab_size:
             raise ValueError(f'Out-of-vocabulary ID: {Path(path).name}')
+        sidecars = {}
+        for prefix in ('valid_', 'loss_'):
+            side = Path(path).with_name(Path(path).name.replace('shard_', prefix, 1))
+            sidecars[prefix.rstrip('_')] = (
+                {'bytes': side.stat().st_size, 'sha256': file_sha256(side)}
+                if side != Path(path) and side.is_file() else None)
         records.append({'name':Path(path).name, 'rows':rows, 'seq_length':seq_length,
-                        'bytes':Path(path).stat().st_size, 'sha256':file_sha256(path)})
+                        'bytes':Path(path).stat().st_size, 'sha256':file_sha256(path),
+                        'sidecars': sidecars})
+        del t  # Do not retain the preceding shard while loading the next one.
     if not records:
         raise ValueError('No shards')
     return records
 
 
-def manifest_fingerprint(records, tokenizer_path):
-    payload = {'shards':records, 'tokenizer_sha256':file_sha256(tokenizer_path)}
+def manifest_fingerprint(records, tokenizer_path, context=None):
+    payload = {'shards':records, 'tokenizer_sha256':file_sha256(tokenizer_path),
+               'context': context}
     return hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
 
 
@@ -52,16 +61,22 @@ def optimizer_step_counts(optimizer_state):
     return values[0]
 
 
-def validate_resume_metadata(state, fingerprint, seqs_per_step):
+def validate_resume_metadata(state, fingerprint, seqs_per_step, token_budget=None):
     r = state.get('resume_state')
     if r is None:
         raise ValueError('Legacy checkpoint requires explicit audited migration metadata')
-    if r.get('schema_version') != 1 or r.get('fingerprint') != fingerprint:
-        raise ValueError('Checkpoint data/tokenizer identity mismatch')
+    if r.get('schema_version') != 2:
+        raise ValueError('Checkpoint requires audited migration to real-token accounting schema 2')
+    if r.get('fingerprint') != fingerprint:
+        raise ValueError('Checkpoint data/tokenizer/config identity mismatch')
     if r.get('seqs_per_step') != seqs_per_step:
         raise ValueError('Checkpoint batch geometry mismatch')
-    if r.get('sample_cursor',-1) < 0 or r.get('completed_updates',-1) < 0:
-        raise ValueError('Checkpoint counters invalid')
+    for field in ('sample_cursor', 'completed_updates', 'optimizer_step_count',
+                  'input_tokens_seen'):
+        if type(r.get(field)) is not int or r[field] < 0:
+            raise ValueError('Checkpoint counters invalid')
+    if token_budget is not None and r['input_tokens_seen'] > token_budget:
+        raise ValueError('Checkpoint real-token counter exceeds budget')
     if r.get('optimizer_step_count') != optimizer_step_counts(state['optimizer_state_dict']):
         raise ValueError('Checkpoint optimizer metadata mismatch')
     return r
