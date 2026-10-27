@@ -11,8 +11,7 @@ import yaml
 import argparse
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from transformers import PreTrainedTokenizerFast
+from torch.utils.data import DataLoader
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -21,9 +20,9 @@ if PROJECT_ROOT not in sys.path:
 from models.architecture import CodeForgeModel
 from models.init_weights import init_model_weights
 from training.utils import get_lr_cosine_schedule
-from training.resume_safety import audit_shards, manifest_fingerprint, optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
-
-os.environ["HF_TOKEN"] = os.environ.get("HF_TOKEN", "")
+from training.resume_safety import manifest_fingerprint, optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
+from training.production_data import LazyShardDataset, select_production_shards
+from training.token_accounting import input_token_budget, budgeted_prefix
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -40,50 +39,9 @@ class Logger:
         self.terminal.flush()
         self.logfile.flush()
 
-class LazyShardDataset(Dataset):
-    """
-    B4 fix: lazy per-shard loading. Only ONE shard (~1000 seqs) is in RAM at a
-    time per worker. Shards are read-only uint16 tensors on disk.
-    Single-pass by design: the trainer consumes a shuffled shard order and
-    NEVER wraps around (epoch guard lives in the training loop).
-    """
-    def __init__(self, tokenized_dir: str, seq_length: int = 2048, shard_files=None, vocab_size=32000):
-        self.seq_length = seq_length
-        self.shard_files = shard_files if shard_files is not None else sorted(
-            glob.glob(os.path.join(tokenized_dir, "shard_*.pt")))
-        if not self.shard_files:
-            raise SystemExit("ERROR: no shards in data/tokenized. Run the data pipeline first.")
-        self.audit_records = audit_shards(self.shard_files, seq_length, vocab_size, allow_partial=True)
-        self.rows = [r['rows'] for r in self.audit_records]
-        self.offsets = [0]
-        for n in self.rows:
-            self.offsets.append(self.offsets[-1]+n)
-        total = self.offsets[-1]
-        self.data = torch.empty(total, seq_length, dtype=torch.uint16)
-        self.valid = torch.full((total,), seq_length, dtype=torch.int32)  # real tokens per row; rest is EOS padding (loss-masked)
-        for i,path in enumerate(self.shard_files):
-            t = torch.load(path,map_location='cpu',weights_only=True)
-            self.data[self.offsets[i]:self.offsets[i+1]] = t
-            side = os.path.join(os.path.dirname(path), os.path.basename(path).replace('shard_', 'valid_', 1))
-            if os.path.exists(side):
-                vl = torch.load(side, map_location='cpu', weights_only=True)['valid_len'].to(torch.int32)
-                if vl.shape[0] != t.shape[0] or int(vl.min()) < 2 or int(vl.max()) > seq_length:
-                    raise SystemExit(f'Bad valid_len sidecar for {os.path.basename(path)}')
-                self.valid[self.offsets[i]:self.offsets[i+1]] = vl
-        print(f'--> [AuditedData] {len(self.shard_files)} shards, {total} real rows; no padding')
-    def __len__(self):
-        return self.offsets[-1]
-    def __getitem__(self, idx):
-        seq = self.data[idx].long()  # uint16 -> long for embedding lookup
-        x = seq[:-1]
-        y = seq[1:].clone()
-        v = int(self.valid[idx])
-        if v < seq.shape[0]:
-            y[v-1:] = -100  # targets at padded positions: ignored by F.cross_entropy (default ignore_index)
-        return x, y
-
 def verify_tokenizer(tokenizer_dir: str):
     """B3 fix: hard-fail if any of the 11 special tokens are missing."""
+    from transformers import PreTrainedTokenizerFast
     REQUIRED = ["<|endoftext|>", "<|unk|>", "<|pad|>", "<|fim_prefix|>", "<|fim_middle|>",
                 "<|fim_suffix|>", "<|tool_call|>", "<|tool_result|>", "<|thinking|>",
                 "<|json_start|>", "<|json_end|>"]
@@ -159,11 +117,22 @@ def train():
     parser.add_argument("--session-steps", type=int, default=None, help="Bounded smoke test; does not change LR schedule")
     parser.add_argument("--init_from", type=str, default=None, help="Warm start: load MODEL WEIGHTS ONLY from this checkpoint (step 0, fresh optimizer/schedule/data cursor). Never overwrites the source file.")
     parser.add_argument("--legacy-migration", type=str, help="Audited JSON identity/counter record for one legacy checkpoint")
+    parser.add_argument("--production-root", help="Preparation root or committed production window root (foundation only)")
+    parser.add_argument("--stage", default="foundation", choices=["foundation", "instruction", "code_instruction", "tool_instruction"])
+    parser.add_argument("--tokenizer-dir", help="Frozen tokenizer directory; production defaults to ROOT/tokenizer")
+    parser.add_argument("--max-input-tokens", type=int, help="Cumulative real input-ID cap; defaults to data.target_tokens")
     args = parser.parse_args()
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
     cfg = full_cfg["model"]
     train_cfg = full_cfg["training"]
+    if args.stage != "foundation":
+        raise SystemExit("Instruction stage refused: assistant-loss-mask consumption is not implemented.")
+    token_budget = input_token_budget(full_cfg, args.max_input_tokens)
+    if args.production_root and token_budget is None:
+        raise SystemExit("Production consumption requires data.target_tokens or --max-input-tokens.")
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.production_root or token_budget is not None):
+        raise SystemExit("Production/real-token budgets currently require the audited single-GPU path.")
     if train_cfg.get("require_explicit_approval") and os.environ.get("CF_TRAINING_APPROVED") != "1":
         raise SystemExit("Training is blocked: notify the owner before launch, then explicitly set CF_TRAINING_APPROVED=1.")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and os.environ.get("CF_ALLOW_DDP") != "1":
@@ -289,24 +258,38 @@ def train():
     val_batches_n = int(train_cfg.get("val_batches", 4))
     seq_len = cfg["max_position_embeddings"]
 
-    # B3: tokenizer must be complete before anything trains
-    tok = verify_tokenizer(os.path.join(PROJECT_ROOT, "data/tokenizer"))
+    tokenizer_dir = args.tokenizer_dir or (
+        os.path.join(args.production_root, "tokenizer") if args.production_root
+        else os.path.join(PROJECT_ROOT, "data/tokenizer"))
+    tok = verify_tokenizer(tokenizer_dir)
     if len(tok) != cfg['vocab_size']:
         raise SystemExit('Tokenizer size differs from checkpoint/model config')
 
-    # B7: hold out a deterministic slice of shards as the validation set
-    all_shards = sorted(glob.glob(os.path.join(PROJECT_ROOT, "data/tokenized/shard_*.pt")))
-    if not all_shards:
-        raise SystemExit("ERROR: data/tokenized is empty. Run the Kaggle data-prep kernel first.")
-    rng = random.Random(42)
-    rng.shuffle(all_shards)
-    n_val = max(1, int(len(all_shards) * 0.005))
-    val_shards, train_shards = all_shards[:n_val], all_shards[n_val:]
-    if os.environ.get("CF_VAL_DIR"):  # dedicated held-out eval rows; train on ALL shards
-        val_shards = sorted(glob.glob(os.path.join(os.environ["CF_VAL_DIR"], "shard_*.pt")))
-        train_shards = all_shards
-        if not val_shards: raise SystemExit("CF_VAL_DIR has no shard_*.pt")
-    print(f"--> [B7] {len(train_shards)} train shards / {len(val_shards)} val shards (0.5% held out)")
+    train_descriptors = val_descriptors = None
+    train_shards = val_shards = None
+    if args.production_root:
+        if os.environ.get("CF_VAL_DIR"):
+            raise SystemExit("CF_VAL_DIR cannot override production manifest split membership.")
+        train_descriptors = select_production_shards(
+            args.production_root, args.stage, "train", tokenizer_dir, seq_len, cfg["vocab_size"])
+        val_descriptors = select_production_shards(
+            args.production_root, args.stage, "val", tokenizer_dir, seq_len, cfg["vocab_size"])
+        print(f"--> [Production] {len(train_descriptors)} train / {len(val_descriptors)} validation shards")
+    else:
+        # Preserve the legacy deterministic flat-shard holdout and order.
+        all_shards = sorted(glob.glob(os.path.join(PROJECT_ROOT, "data/tokenized/shard_*.pt")))
+        if not all_shards:
+            raise SystemExit("ERROR: data/tokenized is empty. Run the data pipeline first.")
+        rng = random.Random(42)
+        rng.shuffle(all_shards)
+        n_val = max(1, int(len(all_shards) * 0.005))
+        val_shards, train_shards = all_shards[:n_val], all_shards[n_val:]
+        if os.environ.get("CF_VAL_DIR"):
+            val_shards = sorted(glob.glob(os.path.join(os.environ["CF_VAL_DIR"], "shard_*.pt")))
+            train_shards = all_shards
+            if not val_shards:
+                raise SystemExit("CF_VAL_DIR has no shard_*.pt")
+        print(f"--> [Legacy] {len(train_shards)} train shards / {len(val_shards)} val shards")
 
     model = CodeForgeModel(cfg).to(device)
     # T4 VRAM: recompute activations in backward (~10x activation reduction)
@@ -365,9 +348,9 @@ def train():
         init_model_weights(raw_model, initializer_range=0.02)
         print("--> [From Scratch] Fresh random init at step 0")
 
-    if args.resume and checkpoint_state.get('resume_state') is None:
+    if args.resume and (checkpoint_state.get('resume_state') or {}).get('schema_version') != 2:
         if not args.legacy_migration:
-            raise SystemExit('Legacy checkpoint: an audited migration record is required before resume.')
+            raise SystemExit('Older checkpoint: an audited schema-2 identity/real-token migration record is required.')
         with open(args.legacy_migration) as f:
             migration = json.load(f)
         if migration.get('checkpoint_sha256') != file_sha256(latest_path):
@@ -376,20 +359,30 @@ def train():
             raise SystemExit('Legacy checkpoint counter differs from audited migration.')
         checkpoint_state['resume_state'] = migration['resume_state']
         start_step = migration['schedule_step']
-        if migration['resume_state']['legacy_sample_cursor'] != start_step * batch_size_per_device * accum_steps:
-            raise SystemExit('Audited legacy cursor and schedule do not agree')
-        print('--> [Migration] Legacy RNG/scaler history unavailable; exact bitwise replay is not claimed.')
+        legacy_cursor = migration['resume_state'].get('legacy_sample_cursor')
+        if legacy_cursor is not None:
+            if legacy_cursor != start_step * batch_size_per_device * accum_steps:
+                raise SystemExit('Audited legacy cursor and schedule do not agree')
+        elif start_step != checkpoint_state['step']:
+            raise SystemExit('Schema-1 migration cannot change the saved schedule step')
+        print('--> [Migration] Audited identity/counters adopted; missing RNG/scaler history is not reconstructed.')
 
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
     train_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
-                                     seq_length=seq_len, shard_files=train_shards, vocab_size=cfg["vocab_size"])
+                                     seq_length=seq_len, shard_files=train_shards, vocab_size=cfg["vocab_size"],
+                                     descriptors=train_descriptors, return_input_tokens=True)
     val_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
-                                   seq_length=seq_len, shard_files=val_shards, vocab_size=cfg["vocab_size"])
-    all_records = sorted(train_dataset.audit_records + val_dataset.audit_records, key=lambda x:x['name'])
-    fingerprint = manifest_fingerprint(all_records, os.path.join(PROJECT_ROOT, 'data/tokenizer/tokenizer.json'))
+                                   seq_length=seq_len, shard_files=val_shards, vocab_size=cfg["vocab_size"],
+                                   descriptors=val_descriptors)
+    # Ordered split membership is part of identity; sorting a combined list loses it.
+    all_records = {"train": train_dataset.audit_records, "validation": val_dataset.audit_records}
+    fingerprint = manifest_fingerprint(all_records, os.path.join(tokenizer_dir, "tokenizer.json"),
+                                       context={"config": {key: full_cfg.get(key) for key in
+                                                           ("model", "training", "data", "run")},
+                                                "stage": args.stage, "input_token_budget": token_budget})
     seqs_per_step = batch_size_per_device * accum_steps * ddp_world
     if checkpoint_state is not None:
-        resume_state = validate_resume_metadata(checkpoint_state, fingerprint, seqs_per_step)
+        resume_state = validate_resume_metadata(checkpoint_state, fingerprint, seqs_per_step, token_budget)
         if resume_state.get('order_version') != 'legacy-filtered-v1':
             raise SystemExit('Unknown saved permutation identity')
         rng_state = checkpoint_state.get('rng_state')
@@ -399,8 +392,10 @@ def train():
             if torch.cuda.is_available() and rng_state.get('torch_cuda'):
                 torch.cuda.set_rng_state_all(rng_state['torch_cuda'])
     else:
-        resume_state = {'schema_version':1, 'fingerprint':fingerprint, 'seqs_per_step':seqs_per_step,
-                        'sample_cursor':0, 'completed_updates':0, 'optimizer_step_count':0, 'order_version':'legacy-filtered-v1'}
+        resume_state = {'schema_version':2, 'fingerprint':fingerprint, 'seqs_per_step':seqs_per_step,
+                        'sample_cursor':0, 'input_tokens_seen':0, 'completed_updates':0,
+                        'optimizer_step_count':0, 'order_version':'legacy-filtered-v1'}
+    budget_limited = False
     if is_ddp:
         import torch.distributed as dist
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -430,14 +425,19 @@ def train():
         skip_samples = resume_state['sample_cursor']
         if skip_samples > len(_perm):
             raise SystemExit('Invalid saved sample cursor')
+        expected_tokens = sum(train_dataset.input_tokens(i) for i in _perm[:skip_samples])
+        if expected_tokens != resume_state['input_tokens_seen']:
+            raise SystemExit("Checkpoint real-token counter differs from its saved data cursor.")
+        remaining_indices, budget_limited = budgeted_prefix(
+            train_dataset, _perm[skip_samples:], resume_state['input_tokens_seen'], token_budget)
         if skip_samples:
             print(f"--> [Resume] data position: {skip_samples:,}/{len(_perm):,} samples already "
                   f"consumed — continuing single pass from there", flush=True)
         dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
-                                sampler=_OrderedIndices(_perm[skip_samples:]),
+                                sampler=_OrderedIndices(remaining_indices),
                                 num_workers=2, pin_memory=True, drop_last=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
-                            num_workers=1, pin_memory=True, drop_last=True)
+                            num_workers=1, pin_memory=True, drop_last=False)
 
     del checkpoint_state
     val_batches = []
@@ -454,7 +454,9 @@ def train():
 
     model.train()
     start_time = time.time()
-    tokens_seen = 0
+    tokens_seen = resume_state['input_tokens_seen']
+    session_start_tokens = tokens_seen
+    print(f"--> [Real inputs] cumulative={tokens_seen:,} budget={token_budget} (whole rows; never overshoots)")
     optimizer.zero_grad()
 
     # WATCHDOG STATE
@@ -502,13 +504,17 @@ def train():
 
             step_loss = 0.0
             batch_seqs = 0
+            batch_tokens = 0
             for micro_step in range(accum_steps):
                 try:
-                    x, y = next(batch_generator)
+                    x, y, input_counts = next(batch_generator)
                 except StopIteration:
                     epoch_done = True
                     batch_generator = None
                     break
+                batch_tokens += int(input_counts.sum())
+                if token_budget is not None and tokens_seen + batch_tokens > token_budget:
+                    raise RuntimeError("Real input-token budget exceeded despite bounded sampler")
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
                 with torch.amp.autocast('cuda', dtype=dtype):
                     logits, loss = model(x, y)
@@ -516,8 +522,6 @@ def train():
                 scaler.scale(scaled_loss).backward()
                 step_loss += loss.item() * x.shape[0]
                 batch_seqs += x.shape[0]
-                # GLOBAL token count: per-rank numel x world (x is seq[:-1] = 2047 tok)
-                tokens_seen += x.numel() * ddp_world
             epoch_done = (batch_generator is None)
             if is_ddp:
                 t = torch.tensor([1 if epoch_done else 0], device=device)
@@ -525,7 +529,8 @@ def train():
                 epoch_done = t.item() > 0
             if epoch_done and batch_seqs == 0:
                 if is_main:
-                    watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
+                    watchdog_write("REAL_INPUT_TOKEN_BUDGET" if budget_limited else "EPOCH_COMPLETE_SINGLE_PASS",
+                                   {"input_tokens_seen": tokens_seen, "input_token_budget": token_budget})
                 break
 
             if batch_seqs < seqs_per_step:
@@ -541,27 +546,20 @@ def train():
             scaler.update()
             update_applied = scaler.get_scale() >= previous_scale
             step = next_step
-            resume_state['sample_cursor'] += batch_seqs
+            if is_ddp:
+                counts = torch.tensor([batch_tokens, batch_seqs], dtype=torch.int64, device=device)
+                torch.distributed.all_reduce(counts)
+                batch_tokens, global_batch_seqs = counts.tolist()
+            else:
+                global_batch_seqs = batch_seqs
+            tokens_seen += batch_tokens
+            resume_state['input_tokens_seen'] = tokens_seen
+            resume_state['sample_cursor'] += global_batch_seqs
             resume_state.pop('legacy_sample_cursor', None)
             resume_state['completed_updates'] += int(update_applied)
             resume_state['optimizer_step_count'] = optimizer_step_counts(optimizer.state_dict())
             optimizer.zero_grad()
             loss_val = step_loss
-
-            # TOKEN ACCOUNTANT (run #1 killer #1): real tokens/step must match config.
-            # x carries seq[:-1] (2047 of 2048 tokens) — 0.05% under is expected.
-            expected_tokens_per_step = seqs_per_step * seq_len * (1 - 1.0 / seq_len)
-            actual = tokens_seen / step_offset
-            mismatch = not epoch_done and step_offset >= 5 and abs(actual - expected_tokens_per_step) > 0.02 * expected_tokens_per_step
-            if is_ddp:
-                t = torch.tensor([1 if mismatch else 0], device=device)
-                torch.distributed.all_reduce(t)
-                mismatch = t.item() > 0
-            if mismatch:
-                if is_main:
-                    watchdog_write("TOKEN_COUNT_MISMATCH",
-                                   {"expected": expected_tokens_per_step, "actual": actual})
-                break
 
             # LOSS FLOOR (run #1 killer #3): ppl < 1.5 mid-run = memorization signature
             if loss_val < math.log(1.5):
@@ -589,7 +587,8 @@ def train():
                     append_metric(metrics_path, {
                         "event": "TRAIN", "step": step, "loss": round(loss_val, 4),
                         "ppl": round(ppl, 2), "lr": current_lr, "tokens_seen": tokens_seen,
-                        "ts": time.time()})
+                        "input_tokens_seen": tokens_seen, "input_token_budget": token_budget,
+                        "session_input_tokens": tokens_seen - session_start_tokens, "ts": time.time()})
 
             # B7: validation cadence + divergence kill. BOTH ranks evaluate (keeps
             # collectives symmetric); rank0 decides, broadcasts, both break together.
@@ -626,7 +625,8 @@ def train():
 
             if epoch_done:
                 if is_main:
-                    watchdog_write("EPOCH_COMPLETE_SINGLE_PASS")
+                    watchdog_write("REAL_INPUT_TOKEN_BUDGET" if budget_limited else "EPOCH_COMPLETE_SINGLE_PASS",
+                                   {"input_tokens_seen": tokens_seen, "input_token_budget": token_budget})
                 break
 
             stop_requested = False
@@ -671,8 +671,10 @@ def train():
             dist.destroy_process_group()
 
     elapsed = time.time() - start_time
-    print(f"--> [DONE] step {step} | {tokens_seen:,} tokens in {elapsed/60:.1f} min "
-          f"({tokens_seen/max(1.0,elapsed):.0f} tok/s)")
+    session_tokens = tokens_seen - session_start_tokens
+    print(f"--> [DONE] step {step} | {tokens_seen:,} cumulative real input IDs / budget={token_budget}; "
+          f"{session_tokens:,} this session in {elapsed/60:.1f} min "
+          f"({session_tokens/max(1.0,elapsed):.0f} real input IDs/s)")
     print("SUCCESS: run #2 session ended cleanly.")
 
 if __name__ == "__main__":

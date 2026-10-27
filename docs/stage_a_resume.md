@@ -7,21 +7,30 @@ The audited resume path currently supports one GPU only.
 ## New-format checkpoints
 
 Use `python training/train.py --resume --max_hours 6` after staging the intended
-checkpoint, tokenizer and shards. Resume fails if the stored data/tokenizer
-fingerprint, batch geometry or optimizer counters do not match.
+checkpoint, tokenizer and shards. Schema-2 resume fails if the stored
+data/tokenizer/config fingerprint, split membership, valid-length/loss-mask
+hashes, batch geometry or optimizer counters do not match.
 
-Checkpoints include the actual sample cursor, optimizer-applied update count,
-GradScaler state and RNG state. The schedule step and optimizer-applied count
-are separate because mixed-precision overflow can skip an optimizer update.
-A final short batch is normalized by its real sample count and saved.
+Checkpoints include the actual sample cursor, cumulative real input IDs
+(`resume_state.input_tokens_seen`), optimizer-applied update count, GradScaler
+state and RNG state. The real-ID count must match the saved ordered cursor.
+The schedule step and optimizer-applied count are separate because
+mixed-precision overflow can skip an optimizer update. A final short batch is
+normalized by its real sample count and saved. `data.target_tokens` or
+`--max-input-tokens` caps cumulative real IDs, not padded slots; whole rows that
+would exceed the cap are left unconsumed. See the README's foundation consumer
+section for production-window selection and input-vs-target semantics.
 
 ## Legacy checkpoint migration
 
-A legacy checkpoint without resume metadata requires an explicit audited JSON
-record passed with `--legacy-migration PATH`. Inspect the validation in
-`training/train.py` for the required fields. Bind the record to the exact
-checkpoint hash, data/tokenizer fingerprint, shard order and reconstructed
-cursor. Never infer the cursor from the reported checkpoint step alone.
+A legacy checkpoint without resume metadata, or with schema-1 metadata,
+requires an explicit audited JSON record passed with `--legacy-migration PATH`.
+Inspect `training/train.py` for the required fields. Bind the record to the exact
+checkpoint hash, schema-2 data/tokenizer/config fingerprint, shard order,
+reconstructed cursor and real-input count. Never infer the cursor or cumulative
+tokens from the reported checkpoint step alone. Schema-1 migration cannot
+change the saved schedule step; legacy unfiltered cursors retain their existing
+schedule/permutation reconciliation checks.
 
 `training/resume_safety.py` filters nonexistent positions from the old seeded
 permutation while keeping valid examples in their original relative order.
