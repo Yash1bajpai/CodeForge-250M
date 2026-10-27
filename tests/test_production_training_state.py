@@ -39,10 +39,15 @@ class ProductionTrainingStateTests(unittest.TestCase):
         for extra, message in [(['--stage', 'instruction'], 'assistant-loss-mask'),
                                ([], 'Training is blocked')]:
             with self.subTest(extra=extra):
+                env = {'PATH': os.defpath, 'PYTHONPATH': str(project),
+                       'CUDA_VISIBLE_DEVICES': '-1'}
+                if os.name == 'nt':  # Winsock and DLL loading need the OS variables
+                    for name in ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'):
+                        if os.environ.get(name):
+                            env[name] = os.environ[name]
                 result = subprocess.run(
                     [sys.executable, '-m', 'training.train', '--config', str(config), *extra],
-                    cwd=self.root, env={'PATH': os.defpath, 'PYTHONPATH': str(project),
-                                        'CUDA_VISIBLE_DEVICES': '-1'},
+                    cwd=self.root, env=env,
                     capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
