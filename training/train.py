@@ -645,7 +645,9 @@ def train():
                     append_metric(metrics_path, {"event": "VAL", "step": step,
                                                  "val_loss": round(val_loss, 4),
                                                  "train_loss": round(loss_val, 4), "ts": time.time()})
-                    if val_trend_diverged(val_history):
+                    # Smooth frequent tiny evaluations, but keep the old four-eval
+                    # startup horizon when validation is sparse (e.g. every 100 steps).
+                    if val_trend_diverged(val_history, half=max(2, 5 // val_steps)):
                         watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in val_history[-10:]]})
                         val_diverged = True
             if is_ddp:

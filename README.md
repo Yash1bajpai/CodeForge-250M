@@ -366,6 +366,28 @@ skipped, 93 subtests passed. The runnable subset excluded
 counted 10 real IDs in 14 input slots under a strict 10-ID cap. This is not
 GPU, full-corpus, training-quality or cloud-readiness evidence.
 
+### Validation trend watchdog
+
+`val_trend_diverged` stops immediately on NaN or either infinity. For finite
+losses it compares the latest `half`-evaluation mean with the best earlier
+complete, non-overlapping block mean, stopping on a rise **above 0.05**.
+Using the best earlier block also catches slow cumulative reversals that an
+adjacent-window difference would miss forever.
+
+The trainer uses `half = max(2, 5 // val_steps)`: every-update validation uses
+five-point means (ten-evaluation startup); validation every 100 updates uses
+two-point means (four-evaluation startup), avoiding a new 1,000-update blind
+period. These are heuristics, not statistically calibrated confidence bounds.
+The real step-166–185 series passes every prefix with either window size.
+
+History is process-local, not checkpointed: resumes restart this finite-trend
+startup period and lose the previous best mean. Short repeated sessions can
+therefore evade the trend guard. Sparse validation provides no wall-clock
+guarantee; keep the approved launcher's independent deadline and hard nonfinite
+gradient/metric/checkpoint checks. The trend check does not replace those guards.
+No validation membership, config values, identity inputs or checkpoint format
+changes are needed for this policy.
+
 ## Stage A benchmark results
 
 Measured on the checkpoint above, using greedy pass@1:

@@ -26,17 +26,19 @@ def calculate_flops_per_step(model, batch_size_seqs: int, seq_len: int) -> float
 
 
 def val_trend_diverged(history, half=5, margin=0.05):
-    """True when validation loss is clearly rising, not just noisy.
+    """Stop on nonfinite loss or a sustained rise above the best earlier mean.
 
-    Compares the mean of the latest `half` evaluations with the mean of the
-    `half` before them. Needs 2*half points and a rise above `margin`, so a
-    few tiny single-batch fluctuations (4 strictly rising points) cannot stop
-    a run whose loss is still falling overall.
+    Compare the latest `half` evaluations with the best earlier complete block
+    of `half` evaluations, excluding overlap. An adjacent-window comparison
+    alone misses arbitrarily large slow drift. Finite trends need 2*half points;
+    NaN and either infinity stop immediately, including during warmup.
     """
+    if any(not math.isfinite(value) for value in history):
+        return True
     if len(history) < 2 * half:
         return False
     recent = sum(history[-half:]) / half
-    previous = sum(history[-2 * half:-half]) / half
-    if recent != recent or previous != previous:
-        return True  # NaN validation loss is never healthy
-    return recent > previous + margin
+    previous = min(sum(history[start:start + half]) / half
+                   for start in range(0, len(history) - 2 * half + 1, half))
+    return (not math.isfinite(recent) or not math.isfinite(previous)
+            or recent > previous + margin)
