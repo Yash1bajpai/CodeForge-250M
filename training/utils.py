@@ -23,3 +23,22 @@ def calculate_flops_per_step(model, batch_size_seqs: int, seq_len: int) -> float
     """
     params = sum(p.numel() for p in model.parameters())
     return 6.0 * params * batch_size_seqs * seq_len
+
+
+def val_trend_diverged(history, half=5, margin=0.05):
+    """Stop on nonfinite loss or a sustained rise above the best earlier mean.
+
+    Compare the latest `half` evaluations with the best earlier complete block
+    of `half` evaluations, excluding overlap. An adjacent-window comparison
+    alone misses arbitrarily large slow drift. Finite trends need 2*half points;
+    NaN and either infinity stop immediately, including during warmup.
+    """
+    if any(not math.isfinite(value) for value in history):
+        return True
+    if len(history) < 2 * half:
+        return False
+    recent = sum(history[-half:]) / half
+    previous = min(sum(history[start:start + half]) / half
+                   for start in range(0, len(history) - 2 * half + 1, half))
+    return (not math.isfinite(recent) or not math.isfinite(previous)
+            or recent > previous + margin)

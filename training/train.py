@@ -19,7 +19,7 @@ if PROJECT_ROOT not in sys.path:
 
 from models.architecture import CodeForgeModel
 from models.init_weights import init_model_weights
-from training.utils import get_lr_cosine_schedule
+from training.utils import get_lr_cosine_schedule, val_trend_diverged
 from training.resume_safety import optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
 from training.production_data import LazyShardDataset, select_production_shards
 from training.token_accounting import input_token_budget, budgeted_prefix
@@ -645,11 +645,11 @@ def train():
                     append_metric(metrics_path, {"event": "VAL", "step": step,
                                                  "val_loss": round(val_loss, 4),
                                                  "train_loss": round(loss_val, 4), "ts": time.time()})
-                    if len(val_history) >= 4:
-                        last4 = val_history[-4:]
-                        if last4[0] < last4[1] < last4[2] < last4[3]:
-                            watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in last4]})
-                            val_diverged = True
+                    # Smooth frequent tiny evaluations, but keep the old four-eval
+                    # startup horizon when validation is sparse (e.g. every 100 steps).
+                    if val_trend_diverged(val_history, half=max(2, 5 // val_steps)):
+                        watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in val_history[-10:]]})
+                        val_diverged = True
             if is_ddp:
                 t = torch.tensor([1 if val_diverged else 0], device=device)
                 torch.distributed.all_reduce(t)
