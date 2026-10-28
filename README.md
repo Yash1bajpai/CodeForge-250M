@@ -291,7 +291,74 @@ global permutation can reload shards frequently; full-scale I/O throughput and
 memory remain unmeasured. No model architecture, hyperparameters, tokenizer or
 preparation recipe changed.
 
-Local synthetic CPU verification: 93 tests passed, 1 optional Kaggle-SDK test
+### Explicit incremental-dataset resume
+
+This mode is an audited handoff, not a fingerprint override or `--init_from`.
+Only fully consumed **foundation** segments can be extended. The new production
+root must contain only the next contiguous owned windows (e.g. 240+); it need not
+contain the old shards. No preparation or training is authorized by this feature.
+
+Proposed invocation, **not a launch instruction**:
+
+```bash
+python -m training.train --config extension.yaml --resume --extend-dataset \
+  --parent-fingerprint PARENT_FINGERPRINT \
+  --parent-production-root /prepared/windows-21-239 \
+  --new-data-manifest /prepared/windows-240-plus/preparation-manifest.json \
+  --validation-root /prepared/windows-21-239 --extension-seed 240
+```
+
+- Preserve the verified parent checkpoint; stage a copy as `latest_checkpoint.pt`
+  in an isolated output directory configured by `checkpointing.output_dir`.
+  Retain the parent's exact `model`, `training`, `data`, `run` sections and
+  cumulative token cap. Other configs, including the default fresh config with
+  different validation settings, cannot substitute for the fingerprint-bound one.
+- The original schema-2 checkpoint contains only a fingerprint/counters, **not**
+  shard records or a schedule snapshot. Supply the complete, hash-verified parent
+  preparation output (including `state.sqlite3`, manifests, shards and sidecars);
+  for step 165 this is the windows-21–239 backup, not an invented prefix of the
+  new output. The loader reconstructs and checks its fingerprint, full cursor and
+  real-ID total. Missing RNG/scaler history and legacy cursor migrations refuse.
+- The new preparation must directly pin that parent manifest and retain its
+  recipe, pipeline and aggregate tokenizer identity. Closed, hash-verified SQLite
+  indices must retain all old document identities; each new provenance document
+  must be unique, absent from the parent index and present in the new index.
+  This includes validation and earlier preparation history, without loading the
+  global document set into RAM. Producer admission/packing remains trusted;
+  these checks are normalized exact deduplication, not exhaustive near-dedup.
+- Validation remains the **original fixed set**, in original order. New validation
+  stays separate and unused, and cannot later enter training. Pass that same
+  `--validation-root` on every extension and ordinary production resume.
+- Schema stays 2. Metadata records `parent_fingerprint`, `new_fingerprint`,
+  `lineage_chain`, consumed-segment/index identities, a config/schedule context
+  snapshot and `extension-permutation-v1` with its explicit seed. `sample_cursor`
+  and `input_tokens_seen` remain cumulative; the new segment starts locally at
+  zero. The token cap remains cumulative and unchanged: whole rows only, no
+  skipping/truncation or overshoot, and no extension after exhausting the cap.
+- Activation atomically replaces only the staged latest checkpoint's metadata
+  before any new update. Model, AdamW, scaler, schedule step/applied counters and
+  RNG are retained; dedicated worker seeds do not advance the restored model RNG.
+  A crash leaves either the original parent or exactly one activated handoff.
+  After activation, **remove extension/parent/new-manifest/seed flags** and use
+  `--resume --production-root NEW_ROOT --validation-root ORIGINAL_ROOT`.
+  Repeating the old handoff refuses; a subsequent extension requires consuming
+  the current segment completely and explicitly supplying its fingerprint/root.
+
+For the verified step-165 parent, the original `smoke.yaml` SHA is
+`f009b67a8b0d302b7f487e0c2d73a4be4d553f295c92564e14d68ee7a410793a`.
+It binds max LR `0.0006`, warmup 500 and max steps 16,221. The checkpoint stores
+LR `0.000198`, but no scheduler/config snapshot; reconstructing its fingerprint
+with that config establishes update 166's LR as `0.0001992`, not a warmup reset.
+The extension CPU regressions are in `tests/test_dataset_extension.py`; no GPU
+execution or real new-window handoff has been verified by these synthetic tests.
+
+Extension verification on Python 3.14.2 / PyTorch 2.14.1+cpu: **126 passed,
+9 skipped, 120 subtests passed** across the full local suite. The skips are eight
+Kaggle-only preparation integrations and one optional Kaggle-SDK test. The actual
+trainer was exercised on tiny CPU fixtures with its hardware gate/autocast
+overridden only in the test harness; production remains GPU-gated.
+
+Historical consumer-only CPU verification: 93 tests passed, 1 optional Kaggle-SDK test
 skipped, 93 subtests passed. The runnable subset excluded
 `test_data_quality.py`, `test_fresh_preparation.py` and
 `test_production_preparation.py` because their imports need unavailable

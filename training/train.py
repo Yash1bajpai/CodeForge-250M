@@ -20,9 +20,12 @@ if PROJECT_ROOT not in sys.path:
 from models.architecture import CodeForgeModel
 from models.init_weights import init_model_weights
 from training.utils import get_lr_cosine_schedule
-from training.resume_safety import manifest_fingerprint, optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
+from training.resume_safety import optimizer_step_counts, validate_resume_metadata, file_sha256, migrated_permutation
 from training.production_data import LazyShardDataset, select_production_shards
 from training.token_accounting import input_token_budget, budgeted_prefix
+from training.dataset_extension import (ORDER_VERSION, dataset_fingerprint, extension_order,
+                                        extension_position, extend_dataset_resume,
+                                        commit_dataset_extension)
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -121,6 +124,12 @@ def train():
     parser.add_argument("--stage", default="foundation", choices=["foundation", "instruction", "code_instruction", "tool_instruction"])
     parser.add_argument("--tokenizer-dir", help="Frozen tokenizer directory; production defaults to ROOT/tokenizer")
     parser.add_argument("--max-input-tokens", type=int, help="Cumulative real input-ID cap; defaults to data.target_tokens")
+    parser.add_argument("--extend-dataset", action="store_true", help="Explicit fully-consumed foundation handoff; requires --resume and verified parent artifacts")
+    parser.add_argument("--parent-fingerprint", help="Exact fingerprint of the checkpoint being extended")
+    parser.add_argument("--parent-production-root", help="Complete prior incremental production root, including its verified state.sqlite3")
+    parser.add_argument("--new-data-manifest", help="New incremental ROOT/preparation-manifest.json (not a union with old windows)")
+    parser.add_argument("--extension-seed", type=int, help="Explicit deterministic seed for the new rows")
+    parser.add_argument("--validation-root", help="Original frozen production validation root; required for extension and its later resumes")
     args = parser.parse_args()
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
@@ -128,6 +137,23 @@ def train():
     train_cfg = full_cfg["training"]
     if args.stage != "foundation":
         raise SystemExit("Instruction stage refused: assistant-loss-mask consumption is not implemented.")
+    extension_options = (args.parent_fingerprint, args.parent_production_root,
+                         args.new_data_manifest, args.extension_seed)
+    if args.extend_dataset:
+        if (not args.resume or args.init_from or args.from_scratch or args.legacy_migration
+                or any(value is None for value in extension_options) or not args.validation_root):
+            parser.error("--extend-dataset requires --resume, --parent-fingerprint, --parent-production-root, --new-data-manifest, --extension-seed and --validation-root; no init/migration")
+        new_manifest = os.path.abspath(args.new_data_manifest)
+        if os.path.basename(new_manifest) != "preparation-manifest.json" or not os.path.isfile(new_manifest):
+            parser.error("--new-data-manifest must name an existing preparation-manifest.json")
+        new_root = os.path.dirname(new_manifest)
+        if args.production_root and os.path.realpath(args.production_root) != os.path.realpath(new_root):
+            parser.error("--production-root and --new-data-manifest disagree")
+        args.production_root = new_root
+    elif any(value is not None for value in extension_options):
+        parser.error("Parent/new-data/seed options require explicit --extend-dataset")
+    if args.validation_root and (not args.resume or not args.production_root):
+        parser.error("--validation-root requires a production --resume")
     token_budget = input_token_budget(full_cfg, args.max_input_tokens)
     if args.production_root and token_budget is None:
         raise SystemExit("Production consumption requires data.target_tokens or --max-input-tokens.")
@@ -273,7 +299,7 @@ def train():
         train_descriptors = select_production_shards(
             args.production_root, args.stage, "train", tokenizer_dir, seq_len, cfg["vocab_size"])
         val_descriptors = select_production_shards(
-            args.production_root, args.stage, "val", tokenizer_dir, seq_len, cfg["vocab_size"])
+            args.validation_root or args.production_root, args.stage, "val", tokenizer_dir, seq_len, cfg["vocab_size"])
         print(f"--> [Production] {len(train_descriptors)} train / {len(val_descriptors)} validation shards")
     else:
         # Preserve the legacy deterministic flat-shard holdout and order.
@@ -376,15 +402,27 @@ def train():
                                    descriptors=val_descriptors)
     # Ordered split membership is part of identity; sorting a combined list loses it.
     all_records = {"train": train_dataset.audit_records, "validation": val_dataset.audit_records}
-    fingerprint = manifest_fingerprint(all_records, os.path.join(tokenizer_dir, "tokenizer.json"),
-                                       context={"config": {key: full_cfg.get(key) for key in
-                                                           ("model", "training", "data", "run")},
-                                                "stage": args.stage, "input_token_budget": token_budget})
+    identity_context = {"config": {key: full_cfg.get(key) for key in ("model", "training", "data", "run")},
+                        "stage": args.stage, "input_token_budget": token_budget}
+    if args.extend_dataset:
+        extended = extend_dataset_resume(
+            checkpoint_state, args.parent_fingerprint, args.parent_production_root, args.production_root,
+            train_dataset, val_dataset, tokenizer_dir, identity_context, args.extension_seed)
+        activated = {**checkpoint_state, "resume_state": extended}
+        validate_resume_metadata(activated, extended["fingerprint"],
+                                 batch_size_per_device * accum_steps, token_budget)
+        commit_dataset_extension(latest_path, checkpoint_state, extended)
+        checkpoint_state = activated
+    saved_metadata = (checkpoint_state or {}).get("resume_state")
+    fingerprint = dataset_fingerprint(all_records, os.path.join(tokenizer_dir, "tokenizer.json"),
+                                      identity_context, saved_metadata)
     seqs_per_step = batch_size_per_device * accum_steps * ddp_world
     if checkpoint_state is not None:
         resume_state = validate_resume_metadata(checkpoint_state, fingerprint, seqs_per_step, token_budget)
-        if resume_state.get('order_version') != 'legacy-filtered-v1':
+        if resume_state.get('order_version') not in ('legacy-filtered-v1', ORDER_VERSION):
             raise SystemExit('Unknown saved permutation identity')
+        if "extension" in resume_state and start_step < resume_state["extension"]["schedule_step"]:
+            raise SystemExit("Extension checkpoint schedule step moved backwards")
         rng_state = checkpoint_state.get('rng_state')
         if rng_state:
             random.setstate(rng_state['python'])
@@ -396,6 +434,9 @@ def train():
                         'sample_cursor':0, 'input_tokens_seen':0, 'completed_updates':0,
                         'optimizer_step_count':0, 'order_version':'legacy-filtered-v1'}
     budget_limited = False
+    # Worker base seeds must not advance the restored model RNG on an extension resume.
+    worker_generator = (torch.Generator().manual_seed(resume_state["order_seed"])
+                        if resume_state["order_version"] == ORDER_VERSION else None)
     if is_ddp:
         import torch.distributed as dist
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -408,7 +449,10 @@ def train():
         # SAME order. On resume we start the sampler at the exact sample offset,
         # so the single pass continues where it stopped — no re-shuffle, no data
         # cycling (run-#1 killer #2).
-        _perm, _valid = migrated_permutation(train_dataset.rows)
+        if resume_state["order_version"] == ORDER_VERSION:
+            _perm = extension_order(train_dataset, resume_state)
+        else:
+            _perm, _valid = migrated_permutation(train_dataset.rows)
         if resume_state.get('legacy_sample_cursor') is not None:
             expected_cursor = int(_valid[:resume_state['legacy_sample_cursor']].sum())
             if expected_cursor != resume_state['sample_cursor']:
@@ -422,10 +466,10 @@ def train():
             def __len__(self):
                 return len(self.indices)
 
-        skip_samples = resume_state['sample_cursor']
+        skip_samples, segment_start_tokens = extension_position(train_dataset, resume_state)
         if skip_samples > len(_perm):
             raise SystemExit('Invalid saved sample cursor')
-        expected_tokens = sum(train_dataset.input_tokens(i) for i in _perm[:skip_samples])
+        expected_tokens = segment_start_tokens + sum(train_dataset.input_tokens(i) for i in _perm[:skip_samples])
         if expected_tokens != resume_state['input_tokens_seen']:
             raise SystemExit("Checkpoint real-token counter differs from its saved data cursor.")
         remaining_indices, budget_limited = budgeted_prefix(
@@ -435,9 +479,9 @@ def train():
                   f"consumed — continuing single pass from there", flush=True)
         dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
                                 sampler=_OrderedIndices(remaining_indices),
-                                num_workers=2, pin_memory=True, drop_last=False)
+                                num_workers=2, pin_memory=True, drop_last=False, generator=worker_generator)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
-                            num_workers=1, pin_memory=True, drop_last=False)
+                            num_workers=1, pin_memory=True, drop_last=False, generator=worker_generator)
 
     del checkpoint_state
     val_batches = []
