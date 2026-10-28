@@ -437,6 +437,18 @@ class DatasetExtensionTests(unittest.TestCase):
             engine.train()
         return output.getvalue()
 
+    def test_actual_cpu_trainer_stops_cleanly_on_nonfinite_validation(self):
+        """Trainer-level guard integration: NaN validation stops at once and still saves a valid checkpoint."""
+        flags = ["--resume", "--extend-dataset", "--parent-fingerprint", self.checkpoint["resume_state"]["fingerprint"],
+                 "--parent-production-root", str(self.parent), "--new-data-manifest", str(self.new / "preparation-manifest.json"),
+                 "--validation-root", str(self.parent), "--extension-seed", "101", "--session-steps", "3"]
+        with patch("training.train.evaluate_val_loss", return_value=float("nan")):
+            log = self.run_trainer_cpu(flags)
+        self.assertIn("VAL_LOSS_DIVERGENCE", log)
+        self.assertIn("[Final] checkpoint saved", log)
+        saved = torch.load(self.latest, weights_only=True)
+        self.assertEqual(saved["step"], self.checkpoint["step"] + 1)  # stopped after the first update, no further rows
+
     def test_actual_cpu_trainer_extension_plain_resume_and_weights_only_start(self):
         parent_hash = file_sha256(self.latest)
         ordinary = self.run_trainer_cpu(["--resume", "--production-root", str(self.parent), "--session-steps", "1"])
