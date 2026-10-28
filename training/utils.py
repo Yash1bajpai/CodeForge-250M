@@ -23,3 +23,20 @@ def calculate_flops_per_step(model, batch_size_seqs: int, seq_len: int) -> float
     """
     params = sum(p.numel() for p in model.parameters())
     return 6.0 * params * batch_size_seqs * seq_len
+
+
+def val_trend_diverged(history, half=5, margin=0.05):
+    """True when validation loss is clearly rising, not just noisy.
+
+    Compares the mean of the latest `half` evaluations with the mean of the
+    `half` before them. Needs 2*half points and a rise above `margin`, so a
+    few tiny single-batch fluctuations (4 strictly rising points) cannot stop
+    a run whose loss is still falling overall.
+    """
+    if len(history) < 2 * half:
+        return False
+    recent = sum(history[-half:]) / half
+    previous = sum(history[-2 * half:-half]) / half
+    if recent != recent or previous != previous:
+        return True  # NaN validation loss is never healthy
+    return recent > previous + margin
