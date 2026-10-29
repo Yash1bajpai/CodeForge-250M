@@ -20,6 +20,8 @@ class ValidationHistory:
         self.interval = validation_interval
         self.history = []
         self.stop = None
+        self.stop_events = []
+        self._waiver = None
 
     def _rising(self):
         last4 = [reading["loss"] for reading in self.history]
@@ -28,12 +30,18 @@ class ValidationHistory:
 
     def require_resume_allowed(self):
         if self.stop is not None:
+            archived = next((event["history"] for event in self.stop_events
+                             if event["stop"] == self.stop), self.history)
+            if self._waiver is not None and self._waiver.permits_stop(self.stop, archived):
+                return
             raise ValidationGuardStopped(
                 f"{STOP_REASON} at step {self.stop['step']} remains active; "
                 "restoring history does not authorize continuation")
 
     def record(self, step, loss):
         self.require_resume_allowed()
+        if self._waiver is not None:
+            self._waiver.require_claimed()
         expected_step = self.history[-1]["step"] + self.interval if self.history else self.interval
         if type(step) is not int or step != expected_step:
             raise ValueError("Validation history cannot skip or duplicate a reading")
@@ -41,18 +49,25 @@ class ValidationHistory:
             raise ValueError("Validation loss must be numeric")
         self.history.append({"step": step, "loss": float(loss), "precision": "full"})
         self.history = self.history[-4:]
-        if self._rising():
+        fired = self._rising()
+        if fired:
             self.stop = {"reason": STOP_REASON, "step": step}
-        return self.stop is not None
+            self.stop_events.append({"rule_version": RULE_VERSION,
+                                     "stop": copy.deepcopy(self.stop),
+                                     "history": copy.deepcopy(self.history)})
+            if self._waiver is not None:
+                self._waiver.new_guard_stop()
+        return fired
 
     def snapshot(self):
         return {"schema_version": 1, "rule_version": RULE_VERSION,
                 "validation_interval": self.interval,
-                "history": copy.deepcopy(self.history), "stop": copy.deepcopy(self.stop)}
+                "history": copy.deepcopy(self.history), "stop": copy.deepcopy(self.stop),
+                "stop_events": copy.deepcopy(self.stop_events)}
 
     @classmethod
     def restore(cls, checkpoint, validation_interval, *, sidecar_path=None,
-                checkpoint_sha256=None, tokenizer_sha256=None):
+                checkpoint_sha256=None, tokenizer_sha256=None, waiver=None):
         """Read metadata only; the caller hashes/loads the actual checkpoint.
 
         Embedded history travels inside resume_state through ordinary saves and
@@ -117,14 +132,33 @@ class ValidationHistory:
                     or not (last == actual or (math.isnan(last) and math.isnan(actual)))):
                 raise ValueError("Latest validation reading must match the full checkpoint loss")
         result.history = copy.deepcopy(history)
+        events = saved.get("stop_events", [])
+        if not isinstance(events, list):
+            raise ValueError("Invalid validation stop audit")
+        for event in events:
+            window = event.get("history", []) if isinstance(event, dict) else []
+            if (len(window) != 4 or event.get("rule_version") != RULE_VERSION
+                    or event.get("stop") != {"reason": STOP_REASON, "step": window[-1].get("step")}
+                    or [point.get("step") for point in window] != list(range(
+                        window[-1]["step"] - 3 * validation_interval,
+                        window[-1]["step"] + 1, validation_interval))
+                    or not (window[0]["loss"] < window[1]["loss"] < window[2]["loss"] < window[3]["loss"])):
+                raise ValueError("Invalid validation stop audit window")
+        result.stop_events = copy.deepcopy(events)
         stop = saved.get("stop")
         if stop is not None:
-            if (not result._rising()
-                    or stop != {"reason": STOP_REASON, "step": last_step}):
+            archived = any(event["stop"] == stop for event in result.stop_events)
+            if not archived and (not result._rising()
+                                 or stop != {"reason": STOP_REASON, "step": last_step}):
                 raise ValueError("Invalid recorded validation divergence stop")
             result.stop = copy.deepcopy(stop)
         elif result._rising():
             # Dropping the stop field must not erase an already-triggered guard.
             result.stop = {"reason": STOP_REASON, "step": last_step}
+        if result.stop is not None and not any(event["stop"] == result.stop for event in result.stop_events):
+            result.stop_events.append({"rule_version": RULE_VERSION,
+                                       "stop": copy.deepcopy(result.stop),
+                                       "history": copy.deepcopy(result.history)})
+        result._waiver = waiver
         result.require_resume_allowed()
         return result

@@ -27,6 +27,8 @@ from training.dataset_extension import (ORDER_VERSION, dataset_fingerprint, exte
                                         extension_position, extend_dataset_resume,
                                         commit_dataset_extension)
 from training.validation_history import ValidationHistory
+from training.step185_trial import (RUN_ID, LIMITS, TrialLimit,
+                                   load_checkpoint, resume_preflight)
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -79,6 +81,13 @@ def append_metric(metrics_path, entry):
             f.write(json.dumps(entry) + "\n")
 
 def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2, resume_state=None, scaler=None):
+    if (resume_state or {}).get("step185_trial") is not None:
+        tensors = list(raw_model.parameters())
+        tensors.extend(value for item in optimizer.state.values() for value in item.values()
+                       if isinstance(value, torch.Tensor))
+        if any(value.is_floating_point() and not bool(torch.isfinite(value).all())
+               for value in tensors):
+            raise RuntimeError("NONFINITE_CHECKPOINT_HOLD: trial checkpoint not written")
     state = {
         'step': step,
         'model_state_dict': raw_model.state_dict(),
@@ -133,9 +142,17 @@ def train():
     parser.add_argument("--validation-root", help="Original frozen production validation root; required for extension and its later resumes")
     parser.add_argument("--validation-history-sidecar",
                         help="Audited history for an older checkpoint; cannot clear a divergence stop")
+    parser.add_argument("--resume-checkpoint", help="Read-only source; trial output is always separate")
+    parser.add_argument("--trial-waiver", help="Exact approved one-time step185 waiver JSON")
+    parser.add_argument("--trial-start-epoch", type=float, help="Launcher start before all setup")
+    parser.add_argument("--trial-output-root", help="New run-ID-specific trial output parent")
+    parser.add_argument("--cpu-resume-preflight", action="store_true",
+                        help="Metadata/sidecar/waiver validation only; no claim, model or updates")
     args = parser.parse_args()
     if args.validation_history_sidecar and not args.resume:
         parser.error("--validation-history-sidecar requires --resume")
+    if (args.resume_checkpoint or args.trial_waiver or args.cpu_resume_preflight) and not args.resume:
+        parser.error("Resume checkpoint, waiver and CPU preflight require --resume")
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
     cfg = full_cfg["model"]
@@ -164,8 +181,79 @@ def train():
         raise SystemExit("Production consumption requires data.target_tokens or --max-input-tokens.")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.production_root or token_budget is not None):
         raise SystemExit("Production/real-token budgets currently require the audited single-GPU path.")
-    if train_cfg.get("require_explicit_approval") and os.environ.get("CF_TRAINING_APPROVED") != "1":
+    if (not args.cpu_resume_preflight and train_cfg.get("require_explicit_approval")
+            and os.environ.get("CF_TRAINING_APPROVED") != "1"):
         raise SystemExit("Training is blocked: notify the owner before launch, then explicitly set CF_TRAINING_APPROVED=1.")
+
+    # Metadata preflight precedes every CUDA/device/model/optimizer initialization.
+    val_steps = int(train_cfg.get("val_steps", 100))
+    val_batches_n = int(train_cfg.get("val_batches", 4))
+    tokenizer_dir = args.tokenizer_dir or (
+        os.path.join(args.production_root, "tokenizer") if args.production_root
+        else os.path.join(PROJECT_ROOT, "data/tokenizer"))
+    ckpt_dir = os.path.join(PROJECT_ROOT, full_cfg.get("checkpointing", {}).get(
+        "output_dir", "checkpoints/CodeForge-250M"))
+    latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
+    source_checkpoint = args.resume_checkpoint or latest_path
+    start_step, checkpoint_state, resume_state = 0, None, None
+    loss_val, val_loss = 0.0, None
+    validation_guard = ValidationHistory(val_steps)
+    trial, trial_store, trial_output = None, None, None
+    if args.resume:
+        checkpoint_state = load_checkpoint(source_checkpoint)
+        if (checkpoint_state.get("resume_state") or {}).get("schema_version") != 2:
+            if not args.legacy_migration:
+                raise SystemExit("Older checkpoint requires its audited schema-2 migration")
+            with open(args.legacy_migration) as stream:
+                migration = json.load(stream)
+            if (migration.get("checkpoint_sha256") != file_sha256(source_checkpoint)
+                    or migration.get("reported_step") != checkpoint_state.get("step")):
+                raise SystemExit("Legacy checkpoint differs from its audited migration")
+            checkpoint_state["resume_state"] = migration["resume_state"]
+            start_step = migration["schedule_step"]
+            cursor = migration["resume_state"].get("legacy_sample_cursor")
+            sequences = train_cfg.get("batch_size_per_device", 16) * train_cfg.get("gradient_accumulation_steps", 16)
+            if ((cursor is not None and cursor != start_step * sequences)
+                    or (cursor is None and start_step != checkpoint_state["step"])):
+                raise SystemExit("Audited legacy cursor/schedule mismatch")
+        else:
+            start_step = checkpoint_state["step"]
+        waiver = None
+        if args.trial_waiver:
+            if (args.from_scratch or args.init_from or args.legacy_migration or args.extend_dataset
+                    or not args.resume_checkpoint or not args.validation_history_sidecar
+                    or args.trial_start_epoch is None
+                    or (not args.cpu_resume_preflight and
+                        (not args.trial_output_root or not args.production_root or not args.validation_root))):
+                parser.error("Trial needs checkpoint, sidecar and start; GPU execution also needs new output and data roots")
+            if val_steps != 1 or val_batches_n != 1:
+                raise SystemExit("Trial keeps val_steps=1 and val_batches=1")
+            context = checkpoint_state["resume_state"].get("identity_context", {}).get("config")
+            if context != {key: full_cfg.get(key) for key in ("model", "training", "data", "run")}:
+                raise SystemExit("Trial model/training/data/run config differs from checkpoint")
+            with open(args.trial_waiver) as stream:
+                waiver = json.load(stream)
+        validation_guard, trial = resume_preflight(
+            checkpoint_state, validation_interval=val_steps,
+            sidecar_path=args.validation_history_sidecar, waiver=waiver,
+            start_epoch=args.trial_start_epoch,
+            checkpoint_sha256=file_sha256(source_checkpoint) if args.validation_history_sidecar or waiver else None,
+            tokenizer_sha256=file_sha256(os.path.join(tokenizer_dir, "tokenizer.json"))
+            if args.validation_history_sidecar or waiver else None)
+        if args.cpu_resume_preflight:
+            print(json.dumps({"status": "METADATA_PREFLIGHT_ONLY_NOT_CLAIMED",
+                              "step": start_step, "guard": validation_guard.snapshot(),
+                              "trial": trial.snapshot() if trial else None}), flush=True)
+            return
+        checkpoint_state["resume_state"]["validation_guard"] = validation_guard.snapshot()
+    if trial is not None:
+        # Never stage the input checkpoint into a mutable latest.pt location.
+        trial_output = os.path.realpath(os.path.join(args.trial_output_root, RUN_ID))
+        if os.path.commonpath([trial_output, os.path.realpath(source_checkpoint)]) == trial_output:
+            raise SystemExit("Trial output cannot contain its source checkpoint")
+        os.makedirs(trial_output, exist_ok=False)
+        ckpt_dir = os.path.join(trial_output, "checkpoints")
+        latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and os.environ.get("CF_ALLOW_DDP") != "1":
         raise SystemExit("This audited Stage A resume supports only one GPU (set CF_ALLOW_DDP=1 for the fresh-start DDP trial; --resume is not supported under DDP).")
     if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.resume or args.legacy_migration):
@@ -185,7 +273,7 @@ def train():
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     is_main = (ddp_rank == 0)
 
-    log_path = os.path.join(PROJECT_ROOT, "training.log")
+    log_path = os.path.join(trial_output or PROJECT_ROOT, "training.log")
     if is_main:
         sys.stdout = Logger(log_path)
         sys.stderr = Logger(log_path)   # tracebacks must reach training.log too
@@ -195,7 +283,13 @@ def train():
 
     if not torch.cuda.is_available():
         print("ERROR: CUDA GPU is not available!")
+        if trial is not None:
+            raise SystemExit("Trial requires a live T4; no GPU fallback")
         return
+    if trial is not None:
+        if (ddp_world != 1 or torch.cuda.device_count() != 1
+                or "T4" not in torch.cuda.get_device_name(0)):
+            raise SystemExit("Trial requires one process and exactly one visible T4")
 
     cap = torch.cuda.get_device_capability(0)
     dtype = torch.float16 if cap[0] < 8 else torch.bfloat16
@@ -207,13 +301,11 @@ def train():
         torch.cuda.manual_seed_all(seed)
 
 
-    metrics_path = os.path.join(PROJECT_ROOT, "metrics.json")
-    ckpt_dir = os.path.join(PROJECT_ROOT, full_cfg.get("checkpointing", {}).get("output_dir", "checkpoints/CodeForge-250M"))
+    metrics_path = os.path.join(trial_output or PROJECT_ROOT, "metrics.json")
     os.makedirs(ckpt_dir, exist_ok=True)
-    latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
 
     uploader = None
-    if (full_cfg.get("checkpointing", {}).get("push_to_hub")
+    if (trial is None and full_cfg.get("checkpointing", {}).get("push_to_hub")
             and full_cfg["checkpointing"].get("hf_path_prefix")):
         from huggingface_hub import HfApi
         from training.checkpoint_upload import SafeCheckpointUploader
@@ -269,7 +361,7 @@ def train():
                 print(f"[Telemetry] push failed (ignored): {e}", flush=True)
 
     _telemetry_thread = None
-    if is_main and not os.environ.get("CF_TELEMETRY_DISABLED"):
+    if is_main and trial is None and not os.environ.get("CF_TELEMETRY_DISABLED"):
         _telemetry_thread = threading.Thread(target=_telemetry_uploader, daemon=True)
         _telemetry_thread.start()
 
@@ -285,13 +377,8 @@ def train():
     warmup_steps = int(train_cfg.get("warmup_steps", 500))
     save_steps = int(full_cfg.get("checkpointing", {}).get("save_steps", 1000))
     save_interval_sec = int(full_cfg.get("checkpointing", {}).get("save_time_interval_minutes", 20)) * 60
-    val_steps = int(train_cfg.get("val_steps", 100))          # B7: val eval cadence
-    val_batches_n = int(train_cfg.get("val_batches", 4))
     seq_len = cfg["max_position_embeddings"]
 
-    tokenizer_dir = args.tokenizer_dir or (
-        os.path.join(args.production_root, "tokenizer") if args.production_root
-        else os.path.join(PROJECT_ROOT, "data/tokenizer"))
     tok = verify_tokenizer(tokenizer_dir)
     if len(tok) != cfg['vocab_size']:
         raise SystemExit('Tokenizer size differs from checkpoint/model config')
@@ -340,19 +427,11 @@ def train():
                                   betas=(0.9, 0.95))
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
 
-    # --- B2: explicit resume only ---
-    start_step = 0
-    checkpoint_state = None
-    resume_state = None
-    validation_guard = ValidationHistory(val_steps)
-    loss_val, val_loss = 0.0, None
     if args.resume:
-        if not os.path.exists(latest_path):
-            raise SystemExit("ERROR: --resume passed but no latest_checkpoint.pt found.")
-        ckpt = torch.load(latest_path, map_location="cpu", weights_only=True)  # cpu: avoid GPU memory spike during restore
+        ckpt = checkpoint_state
         raw_model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        start_step = ckpt.get('step', 0)
+        # start_step was established by the metadata preflight/migration.
         loss_val = ckpt.get('loss', 0.0)
         val_loss = ckpt.get('val_loss', None)
         checkpoint_state = ckpt
@@ -380,32 +459,6 @@ def train():
         init_model_weights(raw_model, initializer_range=0.02)
         print("--> [From Scratch] Fresh random init at step 0")
 
-    if args.resume and (checkpoint_state.get('resume_state') or {}).get('schema_version') != 2:
-        if not args.legacy_migration:
-            raise SystemExit('Older checkpoint: an audited schema-2 identity/real-token migration record is required.')
-        with open(args.legacy_migration) as f:
-            migration = json.load(f)
-        if migration.get('checkpoint_sha256') != file_sha256(latest_path):
-            raise SystemExit('Legacy checkpoint hash differs from audited migration.')
-        if migration.get('reported_step') != checkpoint_state.get('step'):
-            raise SystemExit('Legacy checkpoint counter differs from audited migration.')
-        checkpoint_state['resume_state'] = migration['resume_state']
-        start_step = migration['schedule_step']
-        legacy_cursor = migration['resume_state'].get('legacy_sample_cursor')
-        if legacy_cursor is not None:
-            if legacy_cursor != start_step * batch_size_per_device * accum_steps:
-                raise SystemExit('Audited legacy cursor and schedule do not agree')
-        elif start_step != checkpoint_state['step']:
-            raise SystemExit('Schema-1 migration cannot change the saved schedule step')
-        print('--> [Migration] Audited identity/counters adopted; missing RNG/scaler history is not reconstructed.')
-
-    if args.resume:
-        validation_guard = ValidationHistory.restore(
-            checkpoint_state, val_steps, sidecar_path=args.validation_history_sidecar,
-            checkpoint_sha256=file_sha256(latest_path) if args.validation_history_sidecar else None,
-            tokenizer_sha256=file_sha256(os.path.join(tokenizer_dir, "tokenizer.json"))
-            if args.validation_history_sidecar else None)
-        checkpoint_state["resume_state"]["validation_guard"] = validation_guard.snapshot()
 
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
     train_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
@@ -517,12 +570,23 @@ def train():
     session_start_tokens = tokens_seen
     print(f"--> [Real inputs] cumulative={tokens_seen:,} budget={token_budget} (whole rows; never overshoots)")
     optimizer.zero_grad()
+    if trial is not None:
+        from training.trial_storage import HFTrialStore
+        try:
+            trial_store = HFTrialStore()
+            trial.claim(trial_store)
+        finally:
+            with open(os.path.join(trial_output, "waiver-guard-receipt.json"), "w") as stream:
+                json.dump({"trial": trial.snapshot(), "guard": validation_guard.snapshot()}, stream, indent=2)
+        resume_state["step185_trial"] = trial.snapshot()
 
     # WATCHDOG STATE
     loss_floor_strikes = 0
     last_save_time = time.time()
 
     def watchdog_write(reason, extra=None):
+        if trial is not None:
+            trial.terminal_reason = trial.terminal_reason or reason + "_HOLD"
         entry = {"event": "STOP", "reason": reason, "step": step, "ts": time.time()}
         if extra:
             entry.update(extra)
@@ -534,6 +598,8 @@ def train():
     steps_planned = max_steps - start_step
     if args.session_steps is not None:
         steps_planned = min(steps_planned,args.session_steps)
+    if trial is not None:
+        steps_planned = min(steps_planned, LIMITS["max_attempted_updates"])
 
     step = start_step
     epoch_done = False
@@ -555,6 +621,12 @@ def train():
                 if is_main:
                     watchdog_write("WALL_CLOCK_BUDGET")
                 break
+            if trial is not None:
+                try:
+                    trial.begin_attempt()
+                except TrialLimit:
+                    watchdog_write("TRIAL_LIMIT_HOLD")
+                    break
 
             current_lr = get_lr_cosine_schedule(next_step, warmup_steps, max_steps, max_lr, min_lr)
             for param_group in optimizer.param_groups:
@@ -598,11 +670,25 @@ def train():
                         p.grad.mul_(seqs_per_step / batch_seqs)
             step_loss /= batch_seqs
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=train_cfg.get("max_grad_norm", 1.0))
+            gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=train_cfg.get("max_grad_norm", 1.0))
+            if trial is not None and (not math.isfinite(step_loss) or not math.isfinite(float(gradient_norm))):
+                optimizer.zero_grad()
+                watchdog_write("NONFINITE_GRADIENT_OR_LOSS")
+                break
+            if trial is not None:
+                try:
+                    trial.before_optimizer_step()
+                except TrialLimit:
+                    optimizer.zero_grad()
+                    watchdog_write("TRIAL_LIMIT_HOLD")
+                    break
             previous_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
             update_applied = scaler.get_scale() >= previous_scale
+            if trial is not None:
+                trial.complete_attempt(bool(update_applied))
+                resume_state["step185_trial"] = trial.snapshot()
             step = next_step
             if is_ddp:
                 counts = torch.tensor([batch_tokens, batch_seqs], dtype=torch.int64, device=device)
@@ -653,9 +739,14 @@ def train():
             val_diverged = False
             if step % val_steps == 0:
                 val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
+                if trial is not None and not math.isfinite(val_loss):
+                    watchdog_write("NONFINITE_VALIDATION")
+                    break
                 if is_main:
                     val_diverged = validation_guard.record(step, val_loss)
                     resume_state["validation_guard"] = validation_guard.snapshot()
+                    if trial is not None:
+                        resume_state["step185_trial"] = trial.snapshot()
                     print(f"--> [VAL] step {step}: val_loss={val_loss:.4f} (train {loss_val:.4f})", flush=True)
                     append_metric(metrics_path, {"event": "VAL", "step": step,
                                                  "val_loss": round(val_loss, 4),
@@ -717,9 +808,22 @@ def train():
         _TELEMETRY_STOP.set()  # stop the live telemetry daemon before exit
         if _telemetry_thread is not None and _telemetry_thread.is_alive():
             _telemetry_thread.join(timeout=30)
-        if step > start_step and is_main and not crashed:
+        if trial is not None:
+            resume_state["step185_trial"] = trial.finish(
+                "CRASH_HOLD" if crashed else "BOUNDED_TRIAL_COMPLETE_HOLD")
+            receipt_path = os.path.join(trial_output, "waiver-guard-receipt.json")
+            with open(receipt_path, "w") as stream:
+                json.dump({"trial": trial.snapshot(), "guard": validation_guard.snapshot(),
+                           "step": step, "sample_cursor": resume_state["sample_cursor"],
+                           "status": "HOLD"}, stream, indent=2)
+        if (step > start_step or trial is not None) and is_main and not crashed:
             save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
-            upload_saved(step)
+            if trial is not None:
+                backup = trial_store.publish_final(latest_path, receipt_path)
+                with open(os.path.join(trial_output, "backup-readback.json"), "w") as stream:
+                    json.dump(backup, stream, indent=2)
+            else:
+                upload_saved(step)
             print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)
             append_metric(metrics_path, {"event": "FINAL", "step": step,
                                          "clean": not crashed, "ts": time.time()})
@@ -733,7 +837,8 @@ def train():
     print(f"--> [DONE] step {step} | {tokens_seen:,} cumulative real input IDs / budget={token_budget}; "
           f"{session_tokens:,} this session in {elapsed/60:.1f} min "
           f"({session_tokens/max(1.0,elapsed):.0f} real input IDs/s)")
-    print("SUCCESS: run #2 session ended cleanly.")
+    print("HOLD: bounded trial ended; no automatic continuation." if trial is not None
+          else "SUCCESS: run #2 session ended cleanly.")
 
 if __name__ == "__main__":
     train()

@@ -1,0 +1,27 @@
+{
+  "approval_reference": "Yash WhatsApp 2026-10-29 18:31:52 IST",
+  "binding": {
+    "checkpoint_sha256": "2b69e2c21778bb494e281285e852edb4ac0b1e4d89fb55bc58b5a3990587f5b5",
+    "checkpoint_step": 185,
+    "data_fingerprint": "46f9c60037993a32dd3ecb28acb4f388b1d3919adda221f07a2f4e5af8e248bc",
+    "guard_rule_version": "strict-four-increasing-v1",
+    "sample_cursor": 47232,
+    "tokenizer_sha256": "5d8adf0601c14398390fc4ffcde2a4f0c6152b149ec35c8eedd593d15de454dc",
+    "validation_identity": "af30f98d37e10b39846363903d5a2b01a626ff929746b0e3a05fc689d6ee9a1d"
+  },
+  "limits": {
+    "gpu_name": "Tesla T4",
+    "job_timeout_seconds": 3600,
+    "max_applied_updates": 8,
+    "max_attempted_updates": 8,
+    "update_cutoff_seconds": 2100,
+    "val_batches": 1,
+    "val_steps": 1,
+    "visible_gpus": 1,
+    "world_size": 1
+  },
+  "run_id": "fresh-step185-trial-20261029-183152",
+  "schema_version": 1,
+  "stop_id": "6c98fca0881bca6601e1a61b5448ab828f276b9fcd1a106e50d803c01638f34b",
+  "waiver_id": "step185-yash-20261029-183152"
+}
