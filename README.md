@@ -291,6 +291,75 @@ global permutation can reload shards frequently; full-scale I/O throughput and
 memory remain unmeasured. No model architecture, hyperparameters, tokenizer or
 preparation recipe changed.
 
+### Validation-guard history on resume
+
+The guard still stops on four strictly increasing validation readings, at the
+configured `val_steps` cadence. There is no smoothing, tolerance or reset flag.
+`resume_state.validation_guard` now carries the last four step-stamped losses,
+their precision provenance, the rule version, cadence and any divergence stop.
+The existing checkpoint writer saves this metadata alongside the cursor.
+Resume rejects missing/incomplete history instead of starting an empty window.
+
+An older checkpoint can supply `--validation-history-sidecar PATH` together
+with `--resume`. Its SHA-256, step, cursor, data/validation identities, tokenizer
+SHA-256 and guard-rule version must match; it cannot override embedded history.
+`configs/step185_validation_history.json` records steps182–184 as rounded to four
+decimal places and uses the checkpoint's full-precision step185 loss. It leaves
+the original checkpoint bytes unchanged. **This sidecar preserves the recorded
+`VAL_LOSS_DIVERGENCE` stop and refuses continuation**, before optimizer updates
+or dataset-extension activation. Restarting or restoring history cannot clear it;
+separate training approval alone does not erase the recorded stop.
+
+The model-free regression is
+`python -m unittest discover -s tests -p test_validation_history.py -v`.
+It exercises guard-state persistence only, without loading PyTorch or a model.
+It does not establish model quality, full checkpoint I/O or training readiness.
+
+#### Approved bounded step185 trial (draft implementation)
+
+`configs/step185_trial_waiver.json` names only the approval
+`Yash WhatsApp 2026-10-29 18:31:52 IST`, one fixed waiver/run ID and the exact
+step185 checkpoint/stop/tokenizer/data/validation binding. Ordinary resume still
+refuses. Metadata preflight now runs before CUDA/model/optimizer initialization;
+`--cpu-resume-preflight` validates only and never claims a live waiver.
+
+The trial requires a private conditional-create claim with a parent-commit CAS
+and fresh byte readback before update one. Failed/ambiguous claims abort without
+automatic retry. The consumed claim, approval and limits enter
+`resume_state.step185_trial`; restoring a saved trial result is HOLD, not a new
+authorization. Original stop/readings remain in an append-only stop audit while
+the four-reading window advances normally. A rise at186 triggers on183–186;
+the old readings are not cleared to grant a three-reading grace period.
+
+The code caps attempted/applied updates at8, checks the35-minute deadline both
+before an attempt and immediately before its optimizer step, and retains
+`val_steps=1`/`val_batches=1` and the existing validation fingerprint check.
+A new guard/nonfinite alarm stops updates. Outputs go only to a fresh run-ID
+directory; the original185 file is read-only. Final checkpoint and HOLD receipt
+use a new private HF prefix with full SHA-256 readback, never the original backup
+path. There is no DDP resume or paid fallback.
+
+`scripts/prepare_step185_trial.py --output NEW_PRIVATE_DIRECTORY` prepares a
+self-contained CPU preflight (4CPU/30GB, backend600s/local540s), a single-T4
+launcher (backend3600s plus parent process-group timeout) and `launch-config.json`.
+It only packages/verifies raw source bytes; it does not submit or execute them.
+The launcher requires fresh owner free-quota/admission evidence. Allocated T4x1
+or T4x2 is allowed, but only GPU0 may be used: `CUDA_VISIBLE_DEVICES=0`,
+one process and exactly one runtime-visible T4. T4x2 receipts must explicitly
+record `visible_gpu_count=1` and `cuda_visible_devices="0"`; the second GPU
+stays unused. Instinct owns provider checks, authentication, submission and monitoring.
+
+Phone-safe contracts: `python -m unittest discover -s tests -p test_step185_trial.py -v`.
+Harness/admission regressions: `python -m unittest discover -s tests -p test_preflight_support.py -v`.
+They use isolated local test ledgers, never a live HF claim or a model.
+The CPU harness writes typed YAML, not JSON scientific notation reinterpreted by
+the trainer's YAML reader. Each trainer entry records exit/SystemExit details
+and sanitized last4000-character stdout/stderr tails; success requires the
+explicit metadata-preflight completion status, not just exit0.
+The previous real-checkpoint CPU entry refused ordinary resume but failed in
+the waiver entry. The corrected bundle still needs the execution owner's rerun.
+Live HF CAS claims and CUDA execution remain unverified.
+
 ### Explicit incremental-dataset resume
 
 This mode is an audited handoff, not a fingerprint override or `--init_from`.
