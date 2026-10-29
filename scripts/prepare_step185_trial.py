@@ -191,7 +191,7 @@ def prepare(destination):
              "training/utils.py", "training/resume_safety.py", "training/production_data.py",
              "training/token_accounting.py", "training/dataset_extension.py",
              "training/validation_history.py", "training/step185_trial.py", "training/trial_storage.py",
-             "training/preflight_support.py",
+             "training/preflight_support.py", "training/dual_t4.py",
              "configs/step185_validation_history.json", "configs/step185_trial_waiver.json",
              "tests/test_step185_trial.py", "tests/test_preflight_support.py"]
     payloads = {name: (PROJECT / name).read_bytes() for name in names}

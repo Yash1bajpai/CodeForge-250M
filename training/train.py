@@ -8,6 +8,7 @@ import random
 import traceback
 import threading
 import yaml
+from datetime import timedelta
 import argparse
 import torch
 import torch.nn as nn
@@ -27,6 +28,7 @@ from training.dataset_extension import (ORDER_VERSION, dataset_fingerprint, exte
                                         extension_position, extend_dataset_resume,
                                         commit_dataset_extension)
 from training.validation_history import ValidationHistory
+from training import dual_t4
 from training.step185_trial import (RUN_ID, LIMITS, TrialLimit,
                                    load_checkpoint, resume_preflight)
 os.environ["WANDB_MODE"] = "disabled"
@@ -80,7 +82,7 @@ def append_metric(metrics_path, entry):
         with open(metrics_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
-def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2, resume_state=None, scaler=None):
+def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, keep=2, resume_state=None, scaler=None, rng_state=None):
     if (resume_state or {}).get("step185_trial") is not None:
         tensors = list(raw_model.parameters())
         tensors.extend(value for item in optimizer.state.values() for value in item.values()
@@ -96,7 +98,7 @@ def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, la
         'val_loss': val_loss,
         'resume_state': resume_state,
         'scaler_state_dict': scaler.state_dict() if scaler is not None else {},
-        'rng_state': {
+        'rng_state': rng_state if rng_state is not None else {
             'python': random.getstate(),
             'torch_cpu': torch.get_rng_state(),
             'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
@@ -122,6 +124,7 @@ def save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, la
     return step_path
 
 def train():
+    dual_started = time.time()
     parser = argparse.ArgumentParser(description="CodeForge-250M Training Engine (run #2)")
     parser.add_argument("--from_scratch", action="store_true", help="Force step 0 with fresh init")
     parser.add_argument("--resume", action="store_true", help="Explicitly resume from latest_checkpoint.pt (B2: no silent resumes)")
@@ -148,11 +151,27 @@ def train():
     parser.add_argument("--trial-output-root", help="New run-ID-specific trial output parent")
     parser.add_argument("--cpu-resume-preflight", action="store_true",
                         help="Metadata/sidecar/waiver validation only; no claim, model or updates")
+    parser.add_argument("--dual-t4", action="store_true", help="One-node world2; exact global batch256; no trial-waiver override")
+    parser.add_argument("--dual-t4-output", help="New, exclusively created checkpoint output directory")
+    parser.add_argument("--dual-t4-max-minutes", type=float, help="Explicit approved dual-T4 wall budget, including setup")
     args = parser.parse_args()
     if args.validation_history_sidecar and not args.resume:
         parser.error("--validation-history-sidecar requires --resume")
     if (args.resume_checkpoint or args.trial_waiver or args.cpu_resume_preflight) and not args.resume:
         parser.error("Resume checkpoint, waiver and CPU preflight require --resume")
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if args.dual_t4:
+        if (world != 2 or args.trial_waiver or args.extend_dataset or args.legacy_migration
+                or args.init_from or args.cpu_resume_preflight or args.resume == args.from_scratch
+                or not args.dual_t4_output or not args.session_steps or args.session_steps < 1
+                or args.dual_t4_max_minutes is None or not math.isfinite(args.dual_t4_max_minutes)
+                or args.dual_t4_max_minutes <= 0 or not math.isfinite(args.max_hours) or args.max_hours <= 0):
+            parser.error("Dual T4 needs torchrun world2, explicit resume OR from_scratch, NEW output, positive session-steps/minutes; no waiver/init/extension/migration")
+        if os.environ.get("CF_TRAINING_APPROVED") != "1":
+            raise SystemExit("Dual T4 requires its own approved cloud invocation; no launch authorization is implied")
+        args.max_hours = min(args.max_hours, args.dual_t4_max_minutes / 60)
+    elif world != 1:
+        raise SystemExit("Use the explicit --dual-t4 path for torchrun world2")
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
     cfg = full_cfg["model"]
@@ -179,8 +198,8 @@ def train():
     token_budget = input_token_budget(full_cfg, args.max_input_tokens)
     if args.production_root and token_budget is None:
         raise SystemExit("Production consumption requires data.target_tokens or --max-input-tokens.")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.production_root or token_budget is not None):
-        raise SystemExit("Production/real-token budgets currently require the audited single-GPU path.")
+    if world != 1 and not args.dual_t4:
+        raise SystemExit("Production budgets require single GPU or the explicit dual-T4 path")
     if (not args.cpu_resume_preflight and train_cfg.get("require_explicit_approval")
             and os.environ.get("CF_TRAINING_APPROVED") != "1"):
         raise SystemExit("Training is blocked: notify the owner before launch, then explicitly set CF_TRAINING_APPROVED=1.")
@@ -254,10 +273,13 @@ def train():
         os.makedirs(trial_output, exist_ok=False)
         ckpt_dir = os.path.join(trial_output, "checkpoints")
         latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and os.environ.get("CF_ALLOW_DDP") != "1":
-        raise SystemExit("This audited Stage A resume supports only one GPU (set CF_ALLOW_DDP=1 for the fresh-start DDP trial; --resume is not supported under DDP).")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1 and (args.resume or args.legacy_migration):
-        raise SystemExit("DDP trial path does not support --resume.")
+    if args.dual_t4:
+        source_real = os.path.realpath(source_checkpoint)
+        output_real = os.path.realpath(args.dual_t4_output)
+        if os.path.commonpath([output_real, source_real]) == output_real:
+            raise SystemExit("Dual output cannot contain its input checkpoint")
+        ckpt_dir = output_real
+        latest_path = os.path.join(ckpt_dir, "latest_checkpoint.pt")
 
     # --- DDP setup (Kaggle T4 x2): env vars set by torchrun ---
     ddp_world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -265,15 +287,20 @@ def train():
     ddp_local = int(os.environ.get("LOCAL_RANK", "0"))
     is_ddp = ddp_world > 1
     if is_ddp:
+        dual_t4.require_hardware([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
+                                ddp_world, ddp_rank, ddp_local)
         import torch.distributed as dist
         torch.cuda.set_device(ddp_local)
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=5))
         device = torch.device(f"cuda:{ddp_local}")
     else:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     is_main = (ddp_rank == 0)
+    if is_ddp:
+        dual_t4.rank_zero(lambda: os.makedirs(ckpt_dir, exist_ok=False), device)
 
-    log_path = os.path.join(trial_output or PROJECT_ROOT, "training.log")
+    run_output = trial_output or (ckpt_dir if is_ddp else PROJECT_ROOT)
+    log_path = os.path.join(run_output, "training.log")
     if is_main:
         sys.stdout = Logger(log_path)
         sys.stderr = Logger(log_path)   # tracebacks must reach training.log too
@@ -305,11 +332,12 @@ def train():
         torch.cuda.manual_seed_all(seed)
 
 
-    metrics_path = os.path.join(trial_output or PROJECT_ROOT, "metrics.json")
-    os.makedirs(ckpt_dir, exist_ok=True)
+    metrics_path = os.path.join(run_output, "metrics.json")
+    if is_main:
+        os.makedirs(ckpt_dir, exist_ok=True)
 
     uploader = None
-    if (trial is None and full_cfg.get("checkpointing", {}).get("push_to_hub")
+    if (is_main and trial is None and full_cfg.get("checkpointing", {}).get("push_to_hub")
             and full_cfg["checkpointing"].get("hf_path_prefix")):
         from huggingface_hub import HfApi
         from training.checkpoint_upload import SafeCheckpointUploader
@@ -365,16 +393,15 @@ def train():
                 print(f"[Telemetry] push failed (ignored): {e}", flush=True)
 
     _telemetry_thread = None
-    if is_main and trial is None and not os.environ.get("CF_TELEMETRY_DISABLED"):
+    if is_main and not is_ddp and trial is None and not os.environ.get("CF_TELEMETRY_DISABLED"):
         _telemetry_thread = threading.Thread(target=_telemetry_uploader, daemon=True)
         _telemetry_thread.start()
 
     batch_size_per_device = train_cfg.get("batch_size_per_device", 16)
     accum_steps = train_cfg.get("gradient_accumulation_steps", 16)
-    # DDP: per-device batch x world must give the SAME total tokens/step (524,288).
-    # single: 16 x 16 accum = 256 seqs. 2x T4: 16 x 8 accum x 2 gpus = 256 seqs.
+    # Preserve the original microbatch size/grouping and exact global batch256.
     if is_ddp:
-        accum_steps = max(1, accum_steps // ddp_world)
+        accum_steps = dual_t4.geometry(batch_size_per_device, accum_steps, ddp_world, ddp_rank)
     max_steps = train_cfg.get("max_steps", 4482)
     max_lr = float(train_cfg.get("learning_rate", 6.0e-4))
     min_lr = float(train_cfg.get("min_learning_rate", 6.0e-5))
@@ -417,14 +444,8 @@ def train():
     # T4 VRAM: recompute activations in backward (~10x activation reduction)
     model.gradient_checkpointing = True
     print(f"--> Parameters: {model.get_parameter_count():,} | grad_checkpointing=True")
+    raw_model = model
 
-    # DDP wrap: gradient sync across T4s. device_ids=[local], single process per GPU.
-    if is_ddp:
-        import torch.distributed as dist
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local])
-        raw_model = model.module
-    else:
-        raw_model = model
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr,
                                   weight_decay=train_cfg.get("weight_decay", 0.1),
@@ -462,6 +483,9 @@ def train():
             os.remove(latest_path)
         init_model_weights(raw_model, initializer_range=0.02)
         print("--> [From Scratch] Fresh random init at step 0")
+    if is_ddp:
+        model = torch.nn.parallel.DistributedDataParallel(
+            raw_model, device_ids=[ddp_local], gradient_as_bucket_view=True)
 
 
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
@@ -496,10 +520,7 @@ def train():
             raise SystemExit("Extension checkpoint schedule step moved backwards")
         rng_state = checkpoint_state.get('rng_state')
         if rng_state:
-            random.setstate(rng_state['python'])
-            torch.set_rng_state(rng_state['torch_cpu'])
-            if torch.cuda.is_available() and rng_state.get('torch_cuda'):
-                torch.cuda.set_rng_state_all(rng_state['torch_cuda'])
+            dual_t4.restore_rng(rng_state, ddp_rank, device, is_ddp)
     else:
         resume_state = {'schema_version':2, 'fingerprint':fingerprint, 'seqs_per_step':seqs_per_step,
                         'sample_cursor':0, 'input_tokens_seen':0, 'completed_updates':0,
@@ -509,51 +530,38 @@ def train():
     # Worker base seeds must not advance the restored model RNG on an extension resume.
     worker_generator = (torch.Generator().manual_seed(resume_state["order_seed"])
                         if resume_state["order_version"] == ORDER_VERSION else None)
-    if is_ddp:
-        import torch.distributed as dist
-        train_sampler = torch.utils.data.distributed.DistributedSampler(
-            train_dataset, num_replicas=ddp_world, rank=ddp_rank, shuffle=True, drop_last=True)
-        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
-                                sampler=train_sampler, num_workers=2, pin_memory=True, drop_last=True)
+    # Both modes use the same global permutation, cursor and whole-row budget.
+    if resume_state["order_version"] == ORDER_VERSION:
+        _perm = extension_order(train_dataset, resume_state)
     else:
-        train_sampler = None
-        # Deterministic global permutation (fixed seed): every session sees the
-        # SAME order. On resume we start the sampler at the exact sample offset,
-        # so the single pass continues where it stopped — no re-shuffle, no data
-        # cycling (run-#1 killer #2).
-        if resume_state["order_version"] == ORDER_VERSION:
-            _perm = extension_order(train_dataset, resume_state)
-        else:
-            _perm, _valid = migrated_permutation(train_dataset.rows)
-        if resume_state.get('legacy_sample_cursor') is not None:
-            expected_cursor = int(_valid[:resume_state['legacy_sample_cursor']].sum())
-            if expected_cursor != resume_state['sample_cursor']:
-                raise SystemExit('Migration cursor does not match filtered legacy permutation')
-
-        class _OrderedIndices(torch.utils.data.Sampler):
-            def __init__(self, indices):
-                self.indices = indices
-            def __iter__(self):
-                return iter(self.indices)
-            def __len__(self):
-                return len(self.indices)
-
-        skip_samples, segment_start_tokens = extension_position(train_dataset, resume_state)
-        if skip_samples > len(_perm):
-            raise SystemExit('Invalid saved sample cursor')
-        expected_tokens = segment_start_tokens + sum(train_dataset.input_tokens(i) for i in _perm[:skip_samples])
-        if expected_tokens != resume_state['input_tokens_seen']:
-            raise SystemExit("Checkpoint real-token counter differs from its saved data cursor.")
-        remaining_indices, budget_limited = budgeted_prefix(
-            train_dataset, _perm[skip_samples:], resume_state['input_tokens_seen'], token_budget)
-        if skip_samples:
-            print(f"--> [Resume] data position: {skip_samples:,}/{len(_perm):,} samples already "
-                  f"consumed — continuing single pass from there", flush=True)
-        dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device,
-                                sampler=_OrderedIndices(remaining_indices),
-                                num_workers=2, pin_memory=True, drop_last=False, generator=worker_generator)
+        _perm, _valid = migrated_permutation(train_dataset.rows)
+    if resume_state.get('legacy_sample_cursor') is not None:
+        expected_cursor = int(_valid[:resume_state['legacy_sample_cursor']].sum())
+        if expected_cursor != resume_state['sample_cursor']:
+            raise SystemExit('Migration cursor does not match filtered legacy permutation')
+    skip_samples, segment_start_tokens = extension_position(train_dataset, resume_state)
+    if skip_samples > len(_perm):
+        raise SystemExit('Invalid saved sample cursor')
+    expected_tokens = segment_start_tokens + sum(train_dataset.input_tokens(i) for i in _perm[:skip_samples])
+    if expected_tokens != resume_state['input_tokens_seen']:
+        raise SystemExit("Checkpoint real-token counter differs from its saved data cursor.")
+    remaining_indices, budget_limited = budgeted_prefix(
+        train_dataset, _perm[skip_samples:], resume_state['input_tokens_seen'], token_budget)
+    if skip_samples:
+        print(f"--> [Resume] data position: {skip_samples:,}/{len(_perm):,} samples consumed", flush=True)
+    class _OrderedIndices(torch.utils.data.Sampler):
+        def __iter__(self):
+            return iter(remaining_indices)
+        def __len__(self):
+            return len(remaining_indices)
+    sampler = (dual_t4.RankIndices(remaining_indices, batch_size_per_device, ddp_rank)
+               if is_ddp else _OrderedIndices())
+    dataloader = DataLoader(train_dataset, batch_size=batch_size_per_device, sampler=sampler,
+                            num_workers=2, pin_memory=True, drop_last=False, generator=worker_generator,
+                            multiprocessing_context="spawn" if is_ddp else None)
     val_loader = DataLoader(val_dataset, batch_size=batch_size_per_device, shuffle=False,
-                            num_workers=1, pin_memory=True, drop_last=False, generator=worker_generator)
+                            num_workers=1, pin_memory=True, drop_last=False, generator=worker_generator,
+                            multiprocessing_context="spawn" if is_ddp else None)
 
     del checkpoint_state
     val_batches = []
@@ -569,7 +577,7 @@ def train():
               f"= {seqs_per_step * max_steps:,} needed. Single-pass will fall short — trim max_steps or add data.")
 
     model.train()
-    start_time = time.time()
+    start_time = dual_started if is_ddp else time.time()
     tokens_seen = resume_state['input_tokens_seen']
     session_start_tokens = tokens_seen
     print(f"--> [Real inputs] cumulative={tokens_seen:,} budget={token_budget} (whole rows; never overshoots)")
@@ -587,6 +595,14 @@ def train():
     # WATCHDOG STATE
     loss_floor_strikes = 0
     last_save_time = time.time()
+    def persist_checkpoint(current_step):
+        rng = dual_t4.checkpoint_rng(device) if is_ddp else None
+        def write():
+            path = save_checkpoint(raw_model, optimizer, current_step, loss_val, val_loss,
+                                   ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler, rng_state=rng)
+            upload_saved(current_step)
+            return path
+        return dual_t4.rank_zero(write, device) if is_ddp else write()
 
     def watchdog_write(reason, extra=None):
         if trial is not None:
@@ -636,43 +652,48 @@ def train():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
 
-            step_loss = 0.0
-            batch_seqs = 0
-            batch_tokens = 0
-            for micro_step in range(accum_steps):
-                try:
-                    x, y, input_counts = next(batch_generator)
-                except StopIteration:
-                    epoch_done = True
-                    batch_generator = None
-                    break
-                batch_tokens += int(input_counts.sum())
-                if token_budget is not None and tokens_seen + batch_tokens > token_budget:
-                    raise RuntimeError("Real input-token budget exceeded despite bounded sampler")
-                x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-                with torch.amp.autocast('cuda', dtype=dtype):
-                    logits, loss = model(x, y)
-                    scaled_loss = loss * (x.shape[0] * ddp_world / seqs_per_step)  # x ddp_world: DDP all-reduce averages over ranks; verified 1.0x vs single-process on CPU
-                scaler.scale(scaled_loss).backward()
-                step_loss += loss.item() * x.shape[0]
-                batch_seqs += x.shape[0]
-            epoch_done = (batch_generator is None)
-            if is_ddp:
-                t = torch.tensor([1 if epoch_done else 0], device=device)
-                torch.distributed.all_reduce(t)
-                epoch_done = t.item() > 0
-            if epoch_done and batch_seqs == 0:
+            planned_rows = min(seqs_per_step, len(remaining_indices) - (step_offset - 1) * seqs_per_step) if is_ddp else None
+            if is_ddp and planned_rows <= 0:
                 if is_main:
-                    watchdog_write("REAL_INPUT_TOKEN_BUDGET" if budget_limited else "EPOCH_COMPLETE_SINGLE_PASS",
-                                   {"input_tokens_seen": tokens_seen, "input_token_budget": token_budget})
+                    watchdog_write("REAL_INPUT_TOKEN_BUDGET" if budget_limited else "EPOCH_COMPLETE_SINGLE_PASS")
                 break
-
-            if batch_seqs < seqs_per_step:
-                # Normalize the final partial batch by its actual example count.
-                for p in model.parameters():
-                    if p.grad is not None:
-                        p.grad.mul_(seqs_per_step / batch_seqs)
-            step_loss /= batch_seqs
+            if is_ddp:
+                step_loss, global_batch_seqs, batch_tokens = dual_t4.backward(
+                    model, batch_generator, planned_rows, batch_size_per_device,
+                    ddp_rank, seq_len, scaler, device, dtype)
+                if token_budget is not None and tokens_seen + batch_tokens > token_budget:
+                    raise RuntimeError("Distributed real input-token budget exceeded")
+                epoch_done = (step_offset - 1) * seqs_per_step + planned_rows == len(remaining_indices)
+            else:
+                step_loss, batch_seqs, batch_tokens = 0.0, 0, 0
+                for micro_step in range(accum_steps):
+                    try:
+                        x, y, input_counts = next(batch_generator)
+                    except StopIteration:
+                        batch_generator = None
+                        break
+                    batch_tokens += int(input_counts.sum())
+                    if token_budget is not None and tokens_seen + batch_tokens > token_budget:
+                        raise RuntimeError("Real input-token budget exceeded despite bounded sampler")
+                    x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+                    with torch.amp.autocast('cuda', dtype=dtype):
+                        logits, loss = model(x, y)
+                        scaled_loss = loss * (x.shape[0] / seqs_per_step)
+                    scaler.scale(scaled_loss).backward()
+                    step_loss += loss.item() * x.shape[0]
+                    batch_seqs += x.shape[0]
+                epoch_done = batch_generator is None
+                global_batch_seqs = batch_seqs
+                if global_batch_seqs == 0:
+                    if is_main:
+                        watchdog_write("REAL_INPUT_TOKEN_BUDGET" if budget_limited else "EPOCH_COMPLETE_SINGLE_PASS",
+                                       {"input_tokens_seen": tokens_seen, "input_token_budget": token_budget})
+                    break
+                if global_batch_seqs < seqs_per_step:
+                    for parameter in model.parameters():
+                        if parameter.grad is not None:
+                            parameter.grad.mul_(seqs_per_step / global_batch_seqs)
+                step_loss /= batch_seqs
             scaler.unscale_(optimizer)
             gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=train_cfg.get("max_grad_norm", 1.0))
             if trial is not None and (not math.isfinite(step_loss) or not math.isfinite(float(gradient_norm))):
@@ -686,20 +707,23 @@ def train():
                     optimizer.zero_grad()
                     watchdog_write("TRIAL_LIMIT_HOLD")
                     break
-            previous_scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            update_applied = scaler.get_scale() >= previous_scale
+            if is_ddp:
+                late = time.time() - start_time >= args.max_hours * 3600
+                if dual_t4.any_rank(late, device):
+                    optimizer.zero_grad()
+                    if is_main:
+                        watchdog_write("WALL_CLOCK_BUDGET")
+                    break
+                update_applied = dual_t4.amp_step(scaler, optimizer, gradient_norm, device)
+            else:
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                update_applied = scaler.get_scale() >= previous_scale
             if trial is not None:
                 trial.complete_attempt(bool(update_applied))
                 resume_state["step185_trial"] = trial.snapshot()
             step = next_step
-            if is_ddp:
-                counts = torch.tensor([batch_tokens, batch_seqs], dtype=torch.int64, device=device)
-                torch.distributed.all_reduce(counts)
-                batch_tokens, global_batch_seqs = counts.tolist()
-            else:
-                global_batch_seqs = batch_seqs
             tokens_seen += batch_tokens
             resume_state['input_tokens_seen'] = tokens_seen
             resume_state['sample_cursor'] += global_batch_seqs
@@ -742,12 +766,18 @@ def train():
             # collectives symmetric); rank0 decides, broadcasts, both break together.
             val_diverged = False
             if step % val_steps == 0:
-                val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
+                if is_ddp:
+                    val_loss, val_diverged = dual_t4.validation(validation_guard, step,
+                        lambda: evaluate_val_loss(raw_model, val_batches, device, dtype), device)
+                    resume_state["validation_guard"] = validation_guard.snapshot()
+                else:
+                    val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
                 if trial is not None and not math.isfinite(val_loss):
                     watchdog_write("NONFINITE_VALIDATION")
                     break
                 if is_main:
-                    val_diverged = validation_guard.record(step, val_loss)
+                    if not is_ddp:
+                        val_diverged = validation_guard.record(step, val_loss)
                     resume_state["validation_guard"] = validation_guard.snapshot()
                     if trial is not None:
                         resume_state["step185_trial"] = trial.snapshot()
@@ -766,13 +796,14 @@ def train():
             if val_diverged:
                 break
 
-            if (step % save_steps == 0 or step == max_steps
-                    or (time.time() - last_save_time) >= save_interval_sec):
+            save_due = (step % save_steps == 0 or step == max_steps
+                        or (time.time() - last_save_time) >= save_interval_sec)
+            if is_ddp:
+                save_due = dual_t4.rank_zero(lambda: save_due, device)
+            if save_due:
+                step_path = persist_checkpoint(step)
+                last_save_time = time.time()
                 if is_main:
-                    step_path = save_checkpoint(raw_model, optimizer, step, loss_val, val_loss,
-                                                ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
-                    upload_saved(step)
-                    last_save_time = time.time()
                     print(f"--> [Checkpoint] saved step {step} -> {step_path}", flush=True)
                     append_metric(metrics_path, {"event": "CKPT", "step": step, "path": step_path, "ts": time.time()})
 
@@ -804,8 +835,9 @@ def train():
         # training.log AND the kernel log. FINAL below is marked unclean.
         crashed = True
         tb = traceback.format_exc()
-        append_metric(metrics_path, {"event": "CRASH", "step": step,
-                                     "error": tb[-1500:], "ts": time.time()})
+        if is_main:
+            append_metric(metrics_path, {"event": "CRASH", "step": step,
+                                         "error": tb[-1500:], "ts": time.time()})
         print(f"--> [CRASH] exception at step {step}:\n{tb}", flush=True)
         raise
     finally:
@@ -820,20 +852,18 @@ def train():
                 json.dump({"trial": trial.snapshot(), "guard": validation_guard.snapshot(),
                            "step": step, "sample_cursor": resume_state["sample_cursor"],
                            "status": "HOLD"}, stream, indent=2)
+        if (step > start_step or trial is not None) and not crashed:
+            persist_checkpoint(step)
         if (step > start_step or trial is not None) and is_main and not crashed:
-            save_checkpoint(raw_model, optimizer, step, loss_val, val_loss, ckpt_dir, latest_path, resume_state=resume_state, scaler=scaler)
             if trial is not None:
                 backup = trial_store.publish_final(latest_path, receipt_path)
                 with open(os.path.join(trial_output, "backup-readback.json"), "w") as stream:
                     json.dump(backup, stream, indent=2)
-            else:
-                upload_saved(step)
             print(f"--> [Final] checkpoint saved at step {step} (clean={not crashed})", flush=True)
             append_metric(metrics_path, {"event": "FINAL", "step": step,
                                          "clean": not crashed, "ts": time.time()})
         if is_ddp:
             import torch.distributed as dist
-            dist.barrier()
             dist.destroy_process_group()
 
     elapsed = time.time() - start_time

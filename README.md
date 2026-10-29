@@ -356,9 +356,51 @@ The CPU harness writes typed YAML, not JSON scientific notation reinterpreted by
 the trainer's YAML reader. Each trainer entry records exit/SystemExit details
 and sanitized last4000-character stdout/stderr tails; success requires the
 explicit metadata-preflight completion status, not just exit0.
-The previous real-checkpoint CPU entry refused ordinary resume but failed in
-the waiver entry. The corrected bundle still needs the execution owner's rerun.
-Live HF CAS claims and CUDA execution remain unverified.
+Reviewer-reported execution reached step193 after eight single-T4 updates with
+no new guard alarm. The trial is HOLD, its waiver consumed, and ordinary resume
+still refuses. This does not establish dual-T4 correctness or authorize continuation.
+
+### Dual-T4 DDP path (draft; CPU/Gloo verification blocked)
+
+`--dual-t4` requires a single-node `torchrun` world2, exactly two visible T4s,
+an explicit approved invocation, positive update/wall limits and a new output
+directory. It does not accept the step185 waiver, dataset activation/migration
+flags or warm-start flags. Step193's consumed-trial HOLD remains refused.
+There is no implicit DDP opt-in through `CF_ALLOW_DDP`.
+
+Global batch remains256. Original microbatch groups alternate between ranks;
+the global permutation, whole-row token budget and saved cursor are unchanged.
+An odd final tail uses a zero-weight synthetic microbatch on the empty rank,
+not repeated corpus rows. DDP averages are normalized by global real rows,
+not local rows. Accumulation synchronizes only the last backward.
+
+Rank0 evaluates the original frozen validation batches and broadcasts the
+reading. Both ranks retain the same strict guard history and stop together.
+Only rank0 writes checkpoints/history/logs; checkpoint RNG includes each rank.
+Loss-scaler mismatch aborts before updates; a local overflow skips both ranks
+with matching scale backoff. NCCL data workers use spawn, not unsafe fork.
+
+Proposed command shape only; budgets, free quota and a new GPU approval are
+not set by this change. `CF_TRAINING_APPROVED` is never set by this code:
+
+```bash
+torchrun --standalone --nnodes=1 --nproc-per-node=2 -m training.train \
+  --dual-t4 --resume --resume-checkpoint INPUT_CHECKPOINT \
+  --config PINNED_CONFIG --production-root PRODUCTION_ROOT \
+  --validation-root FROZEN_PARENT_ROOT --tokenizer-dir TOKENIZER_DIR \
+  --dual-t4-output NEW_RUN_DIRECTORY \
+  --session-steps APPROVED_UPDATE_CAP --dual-t4-max-minutes APPROVED_MINUTE_CAP
+```
+
+CPU integration: `python -m unittest discover -s tests -p test_dual_t4.py -v`.
+It uses two bounded CPU/Gloo processes and a two-parameter synthetic model,
+not CodeForge or a corpus. It checks single-rank math parity, disjoint sharding,
+checkpoint/cursor/RNG replay, a one-row tail, scaler overflow/mismatch and
+persisted guard stops. On the phone, Gloo initialization failed before any
+distributed computation: Android denies its PCI sysfs probe; the installed
+CPU wheel lacks UV transport. No Gloo patch, fake topology or skipped failure
+is used to claim success. A working CPU/Gloo host is still required; NCCL/FP16,
+VRAM use and throughput remain unverified. No dual-GPU run is authorized.
 
 ### Explicit incremental-dataset resume
 
