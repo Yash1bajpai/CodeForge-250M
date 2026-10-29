@@ -287,9 +287,13 @@ def train():
             raise SystemExit("Trial requires a live T4; no GPU fallback")
         return
     if trial is not None:
-        if (ddp_world != 1 or torch.cuda.device_count() != 1
-                or "T4" not in torch.cuda.get_device_name(0)):
-            raise SystemExit("Trial requires one process and exactly one visible T4")
+        from training.preflight_support import single_used_t4
+        try:
+            hardware = single_used_t4(torch.cuda.device_count(), torch.cuda.get_device_name(0),
+                                      ddp_world, os.environ.get("CUDA_VISIBLE_DEVICES"))
+        except ValueError as error:
+            raise SystemExit(str(error))
+        print(json.dumps({"trial_hardware": hardware}))
 
     cap = torch.cuda.get_device_capability(0)
     dtype = torch.float16 if cap[0] < 8 else torch.bfloat16

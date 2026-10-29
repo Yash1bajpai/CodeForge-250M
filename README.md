@@ -343,14 +343,22 @@ path. There is no DDP resume or paid fallback.
 self-contained CPU preflight (4CPU/30GB, backend600s/local540s), a single-T4
 launcher (backend3600s plus parent process-group timeout) and `launch-config.json`.
 It only packages/verifies raw source bytes; it does not submit or execute them.
-The launcher requires fresh owner free-quota/admission evidence for one allocated
-T4; it does not silently treat a T4x2 allocation as a single T4. Instinct owns
-provider checks, authentication, submission and monitoring.
+The launcher requires fresh owner free-quota/admission evidence. Allocated T4x1
+or T4x2 is allowed, but only GPU0 may be used: `CUDA_VISIBLE_DEVICES=0`,
+one process and exactly one runtime-visible T4. T4x2 receipts must explicitly
+record `visible_gpu_count=1` and `cuda_visible_devices="0"`; the second GPU
+stays unused. Instinct owns provider checks, authentication, submission and monitoring.
 
 Phone-safe contracts: `python -m unittest discover -s tests -p test_step185_trial.py -v`.
-They use isolated local test ledgers, never a live HF claim or a model. Actual
-HF CAS/readback, the prepared real-checkpoint CPU entry path and CUDA execution
-remain unverified until separately exercised by the execution owner.
+Harness/admission regressions: `python -m unittest discover -s tests -p test_preflight_support.py -v`.
+They use isolated local test ledgers, never a live HF claim or a model.
+The CPU harness writes typed YAML, not JSON scientific notation reinterpreted by
+the trainer's YAML reader. Each trainer entry records exit/SystemExit details
+and sanitized last4000-character stdout/stderr tails; success requires the
+explicit metadata-preflight completion status, not just exit0.
+The previous real-checkpoint CPU entry refused ordinary resume but failed in
+the waiver entry. The corrected bundle still needs the execution owner's rerun.
+Live HF CAS claims and CUDA execution remain unverified.
 
 ### Explicit incremental-dataset resume
 

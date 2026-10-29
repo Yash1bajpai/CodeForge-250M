@@ -11,7 +11,7 @@ CPU_BODY = r'''
 import os, time, signal
 STARTED = time.time()
 os.environ.update(CUDA_VISIBLE_DEVICES="-1", OMP_NUM_THREADS="4", MKL_NUM_THREADS="4", TOKENIZERS_PARALLELISM="false")
-import argparse, gc, hashlib, importlib.util, json, resource, sys, tempfile, unittest
+import argparse, base64, gc, hashlib, importlib.util, json, resource, sys, tempfile, unittest
 from pathlib import Path
 
 def deadline(signum, frame):
@@ -20,7 +20,7 @@ signal.signal(signal.SIGALRM, deadline)
 signal.alarm(540)
 receipt = {"status": "INCOMPLETE_HOLD", "phase": "source_and_inputs", "training_started": False, "optimizer_steps": 0,
            "backward_calls": 0, "model_constructions": 0, "live_waiver_claims": 0,
-           "backend_timeout_seconds_required": 600, "resources": {"cpu": 4, "ram_gb": 30}}
+           "backend_timeout_seconds_required": 600, "resources": {"cpu": 4, "ram_gb": 30}, "entries": []}
 output = Path("/kaggle/working/step185-cpu-preflight-receipt.json")
 try:
     if not Path("/kaggle/working").is_dir():
@@ -73,6 +73,10 @@ try:
     contract.Step185TrialTest.real_checkpoint_metadata = metadata
     contract.Step185TrialTest.source_root = root
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(contract.Step185TrialTest)
+    support_spec = importlib.util.spec_from_file_location("preflight_contract", root / "tests/test_preflight_support.py")
+    support = importlib.util.module_from_spec(support_spec)
+    support_spec.loader.exec_module(support)
+    suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(support.PreflightSupportTest))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful():
         raise RuntimeError("Real-metadata trial contracts failed")
@@ -87,23 +91,24 @@ try:
     torch.Tensor.backward = forbidden
     torch.autograd.backward = forbidden
     torch.cuda.set_device = forbidden
-    config = dict(metadata["resume_state"]["identity_context"]["config"])
-    config["checkpointing"] = {"output_dir": "/tmp/cf-preflight-no-checkpoint-output"}
-    config_path = root / "preflight-config.json"
-    config_path.write_text(json.dumps(config))
+    from training.preflight_support import capture_entry, write_cpu_config
+    config_path = write_cpu_config(metadata["resume_state"]["identity_context"]["config"],
+                                   root / "preflight-config.yaml")
     base = ["train.py", "--resume", "--cpu-resume-preflight", "--resume-checkpoint", str(checkpoint_path),
             "--config", str(config_path), "--validation-history-sidecar", str(root / "configs/step185_validation_history.json"),
             "--tokenizer-dir", str(tokenizer_path.parent)]
-    from training.validation_history import ValidationGuardStopped
-    sys.argv = base
-    try:
-        engine.train()
-    except ValidationGuardStopped:
-        receipt["ordinary_resume_refused"] = True
-    else:
-        raise RuntimeError("Ordinary185 resume incorrectly passed")
-    sys.argv = base + ["--trial-waiver", str(root / "configs/step185_trial_waiver.json"), "--trial-start-epoch", str(STARTED)]
-    engine.train()
+    ordinary = capture_entry(engine.train, base, "ordinary_resume")
+    receipt["entries"].append(ordinary)
+    output.write_text(json.dumps(receipt, indent=2, sort_keys=True))
+    if ordinary["exception_type"] != "ValidationGuardStopped":
+        raise RuntimeError("Ordinary185 resume did not produce its required guard refusal; see entries")
+    receipt["ordinary_resume_refused"] = True
+    waiver = capture_entry(engine.train, base + ["--trial-waiver", str(root / "configs/step185_trial_waiver.json"),
+                           "--trial-start-epoch", str(STARTED)], "waiver_resume")
+    receipt["entries"].append(waiver)
+    output.write_text(json.dumps(receipt, indent=2, sort_keys=True))
+    if waiver["exit_code"] != 0 or "METADATA_PREFLIGHT_ONLY_NOT_CLAIMED" not in waiver["reported_statuses"]:
+        raise RuntimeError("Waiver metadata preflight failed or did not reach the CPU completion boundary; see entries")
     receipt.update(status="CPU_PREFLIGHT_PASS_ONLY_TRAINING_STILL_HOLD", phase="complete", tests_run=result.testsRun,
                    waiver_preflight_passed_not_claimed=True, source_files=SOURCE_SHA,
                    validation_check_scope="Real checkpoint/sidecar identity; actual corpus-shard validation remains in trainer")
@@ -137,13 +142,6 @@ args = parser.parse_args()
 if not Path("/kaggle/working").is_dir() or os.environ.get("CF_TRAINING_APPROVED") != "1":
     raise SystemExit("Only the explicitly approved cloud training invocation may run this launcher")
 receipt = json.loads(Path(args.admission_receipt).read_text())
-if (receipt.get("owner") != "yashbajpai2027" or receipt.get("free_compute") is not True
-        or receipt.get("run_id") != RUN_ID or receipt.get("gpu_name") != "Tesla T4"
-        or receipt.get("allocated_gpu_count") != 1
-        or receipt.get("remaining_quota_seconds", 0) < 3600
-        or not 0 <= STARTED - receipt.get("checked_at_epoch", 0) <= 600
-        or receipt.get("backend_timeout_seconds") != 3600):
-    raise SystemExit("Fresh free-quota/admission proof for one allocated T4 and backend3600seconds is required; no fallback")
 for field in ("checkpoint", "config", "production_root", "validation_root", "tokenizer_dir"):
     setattr(args, field, str(Path(getattr(args, field)).resolve()))
 root = Path(tempfile.mkdtemp(prefix="cf-step185-trial-source-"))
@@ -165,6 +163,10 @@ checks = [
 if any(file_sha256(path) != expected for path, expected in checks):
     raise SystemExit("Original config/production/frozen validation input mismatch")
 os.environ.update(CUDA_VISIBLE_DEVICES="0", WORLD_SIZE="1", TOKENIZERS_PARALLELISM="false", CF_TELEMETRY_DISABLED="1")
+from training.preflight_support import validate_gpu_admission
+allocated = validate_gpu_admission(receipt, time.time(), os.environ["CUDA_VISIBLE_DEVICES"])
+print(json.dumps({"allocated_gpu_count": allocated, "cuda_visible_devices": "0", "planned_used_gpu_count": 1,
+                  "additional_allocated_gpus_allowed": 0, "runtime_visible_count_check_required": True}), flush=True)
 command = [sys.executable, "-m", "training.train", "--resume", "--resume-checkpoint", args.checkpoint,
            "--config", args.config, "--production-root", args.production_root,
            "--validation-root", args.validation_root, "--tokenizer-dir", args.tokenizer_dir,
@@ -189,8 +191,9 @@ def prepare(destination):
              "training/utils.py", "training/resume_safety.py", "training/production_data.py",
              "training/token_accounting.py", "training/dataset_extension.py",
              "training/validation_history.py", "training/step185_trial.py", "training/trial_storage.py",
+             "training/preflight_support.py",
              "configs/step185_validation_history.json", "configs/step185_trial_waiver.json",
-             "tests/test_step185_trial.py"]
+             "tests/test_step185_trial.py", "tests/test_preflight_support.py"]
     payloads = {name: (PROJECT / name).read_bytes() for name in names}
     encoded = {name: base64.b64encode(raw).decode("ascii") for name, raw in payloads.items()}
     hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in payloads.items()}
@@ -221,15 +224,16 @@ def prepare(destination):
               "approval_reference": "Yash WhatsApp 2026-10-29 18:31:52 IST",
               "cpu": {"script": "cpu_preflight.py", "cores": 4, "ram_gb": 30, "accelerator": "None",
                       "backend_timeout_seconds": 600, "local_stop_seconds": 540},
-              "gpu": {"script": "single_t4_launch.py", "allocated_gpus": 1, "visible_gpus": 1,
-                      "gpu_name": "Tesla T4", "backend_timeout_seconds": 3600,
+              "gpu": {"script": "single_t4_launch.py", "allowed_allocated_gpus": [1, 2], "visible_gpus": 1,
+                      "cuda_visible_devices": "0", "used_gpus": 1, "gpu_name": "Tesla T4", "backend_timeout_seconds": 3600,
                       "max_attempted_updates": 8, "max_applied_updates": 8,
                       "no_update_after_seconds": 2100, "val_steps": 1, "val_batches": 1,
                       "output": "/kaggle/working/step185-trials/fresh-step185-trial-20261029-183152",
-                      "physical_allocation_note": "A T4x2 allocation is NOT silently accepted as one T4; no DDP or paid fallback"},
+                      "physical_allocation_note": "T4x2 allowed only with mask0 and exactly1 runtime-visible T4; second unused, no DDP or paid fallback"},
               "admission_receipt_contract": {
                   "owner": "yashbajpai2027", "run_id": "fresh-step185-trial-20261029-183152",
-                  "free_compute": True, "gpu_name": "Tesla T4", "allocated_gpu_count": 1,
+                  "free_compute": True, "gpu_name": "Tesla T4", "allowed_allocated_gpu_counts": [1, 2],
+                  "visible_gpu_count": 1, "cuda_visible_devices": "0",
                   "remaining_quota_seconds_minimum": 3600, "checked_at_epoch_maximum_age_seconds": 600,
                   "backend_timeout_seconds": 3600,
                   "evidence_required": "Instinct verifies live provider quota/allocation and records actual values; this generator does not check or submit anything"},
