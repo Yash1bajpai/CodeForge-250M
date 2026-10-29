@@ -26,6 +26,7 @@ from training.token_accounting import input_token_budget, budgeted_prefix
 from training.dataset_extension import (ORDER_VERSION, dataset_fingerprint, extension_order,
                                         extension_position, extend_dataset_resume,
                                         commit_dataset_extension)
+from training.validation_history import ValidationHistory
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -130,7 +131,11 @@ def train():
     parser.add_argument("--new-data-manifest", help="New incremental ROOT/preparation-manifest.json (not a union with old windows)")
     parser.add_argument("--extension-seed", type=int, help="Explicit deterministic seed for the new rows")
     parser.add_argument("--validation-root", help="Original frozen production validation root; required for extension and its later resumes")
+    parser.add_argument("--validation-history-sidecar",
+                        help="Audited history for an older checkpoint; cannot clear a divergence stop")
     args = parser.parse_args()
+    if args.validation_history_sidecar and not args.resume:
+        parser.error("--validation-history-sidecar requires --resume")
     with open(args.config, "r", encoding="utf-8") as f:
         full_cfg = yaml.safe_load(f)
     cfg = full_cfg["model"]
@@ -339,6 +344,7 @@ def train():
     start_step = 0
     checkpoint_state = None
     resume_state = None
+    validation_guard = ValidationHistory(val_steps)
     loss_val, val_loss = 0.0, None
     if args.resume:
         if not os.path.exists(latest_path):
@@ -393,6 +399,14 @@ def train():
             raise SystemExit('Schema-1 migration cannot change the saved schedule step')
         print('--> [Migration] Audited identity/counters adopted; missing RNG/scaler history is not reconstructed.')
 
+    if args.resume:
+        validation_guard = ValidationHistory.restore(
+            checkpoint_state, val_steps, sidecar_path=args.validation_history_sidecar,
+            checkpoint_sha256=file_sha256(latest_path) if args.validation_history_sidecar else None,
+            tokenizer_sha256=file_sha256(os.path.join(tokenizer_dir, "tokenizer.json"))
+            if args.validation_history_sidecar else None)
+        checkpoint_state["resume_state"]["validation_guard"] = validation_guard.snapshot()
+
     # --- datasets: single-pass over train shards (no while-True wrap!) ---
     train_dataset = LazyShardDataset(os.path.join(PROJECT_ROOT, "data/tokenized"),
                                      seq_length=seq_len, shard_files=train_shards, vocab_size=cfg["vocab_size"],
@@ -433,6 +447,7 @@ def train():
         resume_state = {'schema_version':2, 'fingerprint':fingerprint, 'seqs_per_step':seqs_per_step,
                         'sample_cursor':0, 'input_tokens_seen':0, 'completed_updates':0,
                         'optimizer_step_count':0, 'order_version':'legacy-filtered-v1'}
+    resume_state["validation_guard"] = validation_guard.snapshot()
     budget_limited = False
     # Worker base seeds must not advance the restored model RNG on an extension resume.
     worker_generator = (torch.Generator().manual_seed(resume_state["order_seed"])
@@ -504,7 +519,6 @@ def train():
     optimizer.zero_grad()
 
     # WATCHDOG STATE
-    val_history = []
     loss_floor_strikes = 0
     last_save_time = time.time()
 
@@ -640,16 +654,16 @@ def train():
             if step % val_steps == 0:
                 val_loss = evaluate_val_loss(raw_model, val_batches, device, dtype)
                 if is_main:
-                    val_history.append(val_loss)
+                    val_diverged = validation_guard.record(step, val_loss)
+                    resume_state["validation_guard"] = validation_guard.snapshot()
                     print(f"--> [VAL] step {step}: val_loss={val_loss:.4f} (train {loss_val:.4f})", flush=True)
                     append_metric(metrics_path, {"event": "VAL", "step": step,
                                                  "val_loss": round(val_loss, 4),
                                                  "train_loss": round(loss_val, 4), "ts": time.time()})
-                    if len(val_history) >= 4:
-                        last4 = val_history[-4:]
-                        if last4[0] < last4[1] < last4[2] < last4[3]:
-                            watchdog_write("VAL_LOSS_DIVERGENCE", {"val_history": [round(v, 4) for v in last4]})
-                            val_diverged = True
+                    if val_diverged:
+                        watchdog_write("VAL_LOSS_DIVERGENCE", {
+                            "val_history": [round(reading["loss"], 4)
+                                            for reading in validation_guard.history]})
             if is_ddp:
                 t = torch.tensor([1 if val_diverged else 0], device=device)
                 torch.distributed.all_reduce(t)

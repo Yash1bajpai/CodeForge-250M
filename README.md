@@ -291,6 +291,30 @@ global permutation can reload shards frequently; full-scale I/O throughput and
 memory remain unmeasured. No model architecture, hyperparameters, tokenizer or
 preparation recipe changed.
 
+### Validation-guard history on resume
+
+The guard still stops on four strictly increasing validation readings, at the
+configured `val_steps` cadence. There is no smoothing, tolerance or reset flag.
+`resume_state.validation_guard` now carries the last four step-stamped losses,
+their precision provenance, the rule version, cadence and any divergence stop.
+The existing checkpoint writer saves this metadata alongside the cursor.
+Resume rejects missing/incomplete history instead of starting an empty window.
+
+An older checkpoint can supply `--validation-history-sidecar PATH` together
+with `--resume`. Its SHA-256, step, cursor, data/validation identities, tokenizer
+SHA-256 and guard-rule version must match; it cannot override embedded history.
+`configs/step185_validation_history.json` records steps182–184 as rounded to four
+decimal places and uses the checkpoint's full-precision step185 loss. It leaves
+the original checkpoint bytes unchanged. **This sidecar preserves the recorded
+`VAL_LOSS_DIVERGENCE` stop and refuses continuation**, before optimizer updates
+or dataset-extension activation. Restarting or restoring history cannot clear it;
+separate training approval alone does not erase the recorded stop.
+
+The model-free regression is
+`python -m unittest discover -s tests -p test_validation_history.py -v`.
+It exercises guard-state persistence only, without loading PyTorch or a model.
+It does not establish model quality, full checkpoint I/O or training readiness.
+
 ### Explicit incremental-dataset resume
 
 This mode is an audited handoff, not a fingerprint override or `--init_from`.

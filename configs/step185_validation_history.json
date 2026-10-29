@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "binding": {
+    "checkpoint_sha256": "2b69e2c21778bb494e281285e852edb4ac0b1e4d89fb55bc58b5a3990587f5b5",
+    "checkpoint_step": 185,
+    "sample_cursor": 47232,
+    "data_fingerprint": "46f9c60037993a32dd3ecb28acb4f388b1d3919adda221f07a2f4e5af8e248bc",
+    "validation_identity": "af30f98d37e10b39846363903d5a2b01a626ff929746b0e3a05fc689d6ee9a1d",
+    "tokenizer_sha256": "5d8adf0601c14398390fc4ffcde2a4f0c6152b149ec35c8eedd593d15de454dc",
+    "guard_rule_version": "strict-four-increasing-v1"
+  },
+  "validation_guard": {
+    "schema_version": 1,
+    "rule_version": "strict-four-increasing-v1",
+    "validation_interval": 1,
+    "history": [
+      {"step": 182, "loss": 6.0613, "precision": "rounded_4dp"},
+      {"step": 183, "loss": 6.0621, "precision": "rounded_4dp"},
+      {"step": 184, "loss": 6.0847, "precision": "rounded_4dp"},
+      {"step": 185, "loss": 6.085826873779297, "precision": "full"}
+    ],
+    "stop": {"reason": "VAL_LOSS_DIVERGENCE", "step": 185}
+  },
+  "provenance": {
+    "rounded_readings": "yashbajpai2027/codeforge-fresh-20261028-extend-gpu/1: cf-fresh-20261027-overnight/continuation.log; only four-decimal readings were recorded for182-184",
+    "full_precision_reading": "Checkpoint185 val_loss, independently extracted in yashbajpai2027/codeforge-verify-step185-cpu/1: verify-185.json",
+    "authorization": "History restoration only. The recorded divergence stop remains active; this sidecar does not authorize continuation."
+  }
+}
